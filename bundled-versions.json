@@ -1,0 +1,27 @@
+{
+  "python": "3.12.3",
+  "packages": {
+    "pycryptodome": "3.23.0",
+    "pytesseract": "0.3.13",
+    "pillow": "12.1.1",
+    "packaging": "26.0",
+    "requests": "2.33.1",
+    "certifi": "2026.2.25",
+    "urllib3": "2.6.3",
+    "idna": "3.11",
+    "charset-normalizer": "3.4.7",
+    "selenium": "4.43.0",
+    "websocket-client": "1.9.0",
+    "typing_extensions": "4.15.0",
+    "trio-websocket": "0.12.2",
+    "wsproto": "1.3.2",
+    "h11": "0.16.0",
+    "trio": "0.33.0",
+    "cffi": "2.0.0",
+    "pycparser": "3.0",
+    "sniffio": "1.3.1",
+    "outcome": "1.3.0.post0",
+    "attrs": "26.1.0",
+    "sortedcontainers": "2.4.0"
+  }
+}

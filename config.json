@@ -1,0 +1,38 @@
+{
+  "headless": true,
+  "browser": "chrome",
+  "login": {
+    "username": "${JACCOUNT_USERNAME}",
+    "password": "${JACCOUNT_PASSWORD}"
+  },
+  "notifications": {
+    "FANGTANG_KEY": "${FANGTANG_KEY}",
+    "FEISHU_WEBHOOK": "${FEISHU_WEBHOOK}",
+    "FEISHU_SECRET": "${FEISHU_SECRET}",
+    "WECOM_WEBHOOK": "${WECOM_WEBHOOK}"
+  },
+  "tasks": [
+    {
+      "venue_key": "stu_gym",
+      "weekdays": [
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7
+      ],
+      "time_ranges": [
+        "7-22"
+      ],
+      "seat_priority": [],
+      "count_per_slot": 2,
+      "parallel_confirm": 1,
+      "confirm_batches": 2,
+      "confirm_jitter_ms": 80,
+      "confirm_backoff_ms": 400,
+      "confirm_timeout_s": 6
+    }
+  ]
+}

@@ -1,0 +1,23 @@
+# 依赖与本地状态，一律不入库
+.venv/
+venv/
+__pycache__/
+*.pyc
+
+# Windows 便携运行时（第三方二进制，体积大且非本仓库产物）
+runtime/
+MANIFEST.sha256
+
+# 个人数据：会话、账号设置、日志、预约记录
+state/
+logs/
+chrome-profile/
+ui_settings.json
+config.local.json
+run.log
+scan.log
+mac-launch.log
+startup-error.log
+notifications.json
+notifications.txt
+detections.log
