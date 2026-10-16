@@ -57,7 +57,7 @@ JACCOUNT_USERNAME=... JACCOUNT_PASSWORD=... \
 - **活跃时段**：默认只在 07:00-23:00 发请求（`ACTIVE_START_HOUR` / `ACTIVE_END_HOUR`），`HOLD_UNTIL="YYYY-MM-DD HH:MM"` 可挂起到指定时间再开始。一次查询返回整天 15 个时段，扫全天和扫一小时花费相同。
 - **单次命中不可信**：同一段位在几十秒内会在 `status=0` 与 `-3` 之间反复横跳（他人锁位或后端缓存不一致），所以命中后要求连续 5 次读到可约才告警，抖动只写 `[slot_blink]` 记录。
 - **会话有效性判据**：`backend_api.validate_cookie` 在接口超时时会返回 True，不能当登录成功依据；本仓库以「查询接口能否拿到 `dateId`」为唯一判据。
-- 杀进程会留下占用 `chrome-profile` 的孤儿 Chrome，重登前自动清理并删 `SingletonLock`。
+- 杀进程会留下占用 `chrome-profile` 的孤儿 Chrome：下次 Chrome 起不来报 `SessionNotCreatedException`，而且这个没有窗口的 headless Chrome 会让 macOS 关机卡住（Chrome 不响应退出请求）。所有会启动浏览器的入口都接了 `browser_cleanup.py`：正常 `quit()`、信号处理、起新浏览器前清扫残留，并按项目目录归属过滤，不会误杀你自己开的 Chrome。
 
 告警走本机静默弹窗（`alert_helper.py`）+ `notifications.txt` 记录，不发声。如果需要在手机收到，可把 Server酱 / 飞书 / 企微任一 webhook 填进 `config.json` 的通知配置或图形界面里对应输入框。
 

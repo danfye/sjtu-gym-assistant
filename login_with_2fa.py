@@ -21,6 +21,11 @@ import login_and_cookie as L
 import browser_cleanup as BC
 from cookie_store import save_cookie
 
+if __name__ != '__main__':
+    # 本文件从第 24 行起就是模块级流程（启动浏览器、登录、写 cookie），被 import 会直接执行
+    raise RuntimeError(
+        'login_with_2fa.py 请直接运行：python login_with_2fa.py（不要 import 本模块）')
+
 PROFILE_DIR = base / 'chrome-profile'
 PROFILE_DIR.mkdir(exist_ok=True)
 PW = os.environ.get('JACCOUNT_PASSWORD', '')
