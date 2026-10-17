@@ -275,6 +275,32 @@ def refresh_cookie(reason: str):
         return None
 
 
+def situation_probe_msg(cookie: str, date_str: str, session=None):
+    """只发一次 queryFieldSituation，取回它的 msg。
+
+    这个接口才是真正被每日配额限制的那个，而 backend_api.query_field_situation 失败时会
+    内部重试 20 次 —— 五个日期一轮就是 100 个请求，越限流越猛。所以每轮先单发一次探一下。
+    """
+    vm = VENUE_MAP['stu_gym']
+    s = session or requests
+    try:
+        did = query_date_ids(cookie, vm['venTypeId'], vm['venueId'], date_str, session=s).get(date_str)
+    except AuthError:
+        raise
+    except Exception as exc:
+        return f'{type(exc).__name__} {str(exc)[:60]}', None
+    if not did:
+        return 'no-dateId', None
+    try:
+        r = s.post(f"{API_BASE}/manage/fieldDetail/queryFieldSituation",
+                   json={'fieldType': vm['venTypeId'], 'date': date_str, 'venueId': vm['venueId'], 'dateId': did},
+                   headers=_headers(cookie), timeout=8)
+        j = r.json()
+        return str(j.get('msg') or ''), (j.get('data') or [])
+    except Exception as exc:
+        return f'{type(exc).__name__} {str(exc)[:60]}', None
+
+
 def wait_until_active():
     """只在活跃时段（默认 07:00-23:00）发请求，避免凌晨白白消耗每日配额。
 
@@ -349,6 +375,24 @@ def main():
         wait_until_active()
         round_no += 1
         log(f'第 {round_no} 轮')
+        # 每轮先单发一次排期查询：撞配额就直接休眠，别让 20 次重试把请求量放大成上百个
+        msg0, _data0 = situation_probe_msg(cookie, targets[0][0], session)
+        if '每日请求超过限制' in msg0:
+            nxt = datetime.now().replace(hour=0, minute=10, second=0, microsecond=0)
+            if nxt <= datetime.now():
+                nxt += timedelta(days=1)
+            wait_s = (nxt - datetime.now()).total_seconds()
+            log(f'排期接口今日配额已用尽，休眠 {wait_s/3600:.1f} 小时到 {nxt:%m-%d %H:%M}')
+            if time.time() - state.get('_quota_notify_ts', 0) > AUTH_NOTIFY_COOLDOWN_S:
+                notify_progress('quota_exhausted',
+                                f'排期接口今日请求配额用尽，扫描休眠到 {nxt:%m-%d %H:%M}'
+                                f'（约 {wait_s/3600:.1f} 小时后自动恢复）',
+                                repeat=False)
+                state['_quota_notify_ts'] = time.time()
+                state['_last_ok_ts'] = time.time()
+                save_state(state)
+            time.sleep(max(60.0, wait_s))
+            continue
         try:
             results, dead, all_empty, real_data = scan_once(cookie, targets, session)
         except AuthError as exc:
