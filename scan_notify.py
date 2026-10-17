@@ -236,10 +236,7 @@ def refresh_cookie(reason: str):
     实测包内默认的 headless 形态会被 jAccount 当成新设备、再次要求二次验证，因此这里走
     strict_login 的「有窗口 + 去自动化指纹」形态，并用真实查询接口（能否拿到 dateId）判定成功。
     """
-    log(f'尝试重新登录：{reason}')
-    if not (_uk and _pk):
-        log('环境变量里没有 JACCOUNT_USERNAME/JACCOUNT_PASSWORD，无法自动重登')
-        return None
+    log(f'尝试取得可用会话：{reason}')
     # 先清掉可能占着 chrome-profile 的孤儿 Chrome，否则新 Chrome 起不来
     try:
         BC.sweep_stale()   # 连 chromedriver 和它名下的 Chrome 一起收，别只靠 pkill
@@ -248,6 +245,19 @@ def refresh_cookie(reason: str):
     except Exception:
         pass
     (BASE / 'chrome-profile' / 'SingletonLock').unlink(missing_ok=True)
+    # 快速路径：profile 里往往已经是登录状态，直接取会话。2026-10-17 的连败就是卡在这里 ——
+    # 已登录时点“校内人员登录”不会跳 jAccount，strict_login 苦等跳转必然超时。
+    try:
+        from harvest_session import harvest_existing
+        ck = harvest_existing()
+        if ck:
+            log('复用浏览器现有会话成功，无需重新登录')
+            return ck
+    except Exception as exc:
+        log(f'取现有会话失败：{type(exc).__name__} {str(exc)[:150]}')
+    if not (_uk and _pk):
+        log('环境变量里没有 JACCOUNT_USERNAME/JACCOUNT_PASSWORD，无法走完整登录')
+        return None
     try:
         import strict_login
         ok = strict_login.try_login(False, True, '自动重登（有窗口+反指纹）')
@@ -304,20 +314,18 @@ def main():
     log('=== 扫描启动：只查不买 ===')
     log('目标：' + ' | '.join(f'{d} {t}' for d, t in targets) + f'；每 {interval:.0f}s 一轮')
 
-    wait_until_active()
-    cookie, saved_at = load_cookie()
-    if not cookie:
-        cookie = refresh_cookie('本机还没有已保存的 cookie')
+    # 启动时没有可用会话就反复重试，绝不退出（2026-10-16 教训：原来失败即 return，结果白等一天）
+    cookie = None
+    while not cookie:
+        wait_until_active()
+        cookie, saved_at = load_cookie()
+        if cookie and validate_cookie(cookie, 'stu_gym', targets[0][0]):
+            break
+        cookie = refresh_cookie('启动时 cookie 缺失或已失效')
         if not cookie:
-            notify_progress('error_occurred', '没有可用 cookie，请先完成一次登录（含二次验证）', sound='Basso')
-            return
-    elif not validate_cookie(cookie, 'stu_gym', targets[0][0]):
-        cookie = refresh_cookie(f'启动时检测到 cookie 已失效（保存于 {saved_at}）')
-        if not cookie:
-            notify_progress('auth_required', 'cookie 已失效且自动重登失败，需要重新登录+二次验证：跑 login_with_2fa.py',
-                            sound='Basso')
-            return
-    log(f'使用 cookie（保存于 {saved_at}）')
+            log('重登未成功，90 秒后重试（进程不退出）')
+            time.sleep(90)
+    log(f'使用 cookie（保存于 {load_cookie()[1]}）')
 
     state = load_state()
     session = requests.Session()
@@ -378,16 +386,16 @@ def main():
                 state['_login_fails'] = fails
                 save_state(state)
                 if len(fails) >= 3:
-                    # 一小时内三次重登都失败，多半是撞上每日请求配额，硬撞只会更糟
-                    nxt = datetime.now().replace(hour=0, minute=10, second=0, microsecond=0) + timedelta(days=1)
-                    wait_s = (nxt - datetime.now()).total_seconds()
-                    log(f'一小时内 {len(fails)} 次重登失败，疑似触发每日请求配额，休眠到 {nxt:%m-%d %H:%M}')
-                    notify_progress('quota_exhausted',
-                                    f'连续重登失败，疑似今日请求配额用尽；扫描休眠约 {wait_s/3600:.1f} 小时，到 {nxt:%m-%d %H:%M} 自动恢复',
+                    # 连续失败只退避，不再一口气睡到第二天（2026-10-17 教训：登录逻辑的 bug
+                    # 被误判成“配额用尽”，结果一整天没扫）。真正的配额情况由上面的 quota_state 分支处理。
+                    notify_progress('auth_required',
+                                    f'一小时内 {len(fails)} 次拿不到可用会话，退避 30 分钟后继续重试；'
+                                    '如果一直不行，需要人工跑一次 login_with_2fa.py',
                                     repeat=False)
                     state['_login_fails'] = []
                     save_state(state)
-                    time.sleep(max(60.0, wait_s))
+                    log('退避 1800 秒后重试')
+                    time.sleep(1800)
                     continue
             if new:
                 cookie = new

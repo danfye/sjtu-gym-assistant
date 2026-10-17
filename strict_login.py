@@ -38,6 +38,14 @@ def build_options(headless: bool, anti_detect: bool):
     opts.add_argument(f'--user-data-dir={PROFILE}')
     opts.add_argument('--window-size=1280,900')
     opts.add_argument('--lang=zh-CN')
+    # 本机 DNS 解析不出学校域名时，显式走本地代理（由代理端解析）
+    proxy = os.environ.get('CHROME_PROXY', '').strip()
+    if proxy:
+        opts.add_argument(f'--proxy-server={proxy}')
+    # 本机 DNS 不可用时，直接把域名映射到 IP，绕开解析（例："MAP sports.sjtu.edu.cn 202.120.35.148, MAP jaccount.sjtu.edu.cn 202.120.2.109"）
+    host_rules = os.environ.get('CHROME_HOST_RESOLVER', '').strip()
+    if host_rules:
+        opts.add_argument(f'--host-resolver-rules={host_rules}')
     if headless:
         opts.add_argument('--headless=new')
     if anti_detect:
@@ -142,13 +150,21 @@ def try_login(headless: bool, anti_detect: bool, label: str):
 
 if __name__ == '__main__':
     BC.install_handlers()
+    # 有窗口形态排在最前：headless 会被 jAccount 判成新设备、再次要求二次验证（2026-10-15 实测）
     cases = [
-        (True, True, 'headless + 反自动化指纹'),
         (False, True, '有窗口 + 反自动化指纹'),
+        (True, True, 'headless + 反自动化指纹'),
         (True, False, 'headless + 包内原始选项'),
     ]
     for hl, ad, label in cases:
-        if try_login(hl, ad, label):
-            sys.exit(0)
+        try:
+            if try_login(hl, ad, label):
+                sys.exit(0)
+        except SystemExit:
+            raise
+        except Exception as exc:
+            # 单个形态失败（页面超时、风控、站点慢）不该让整个脚本退出
+            print(f'该形态异常，换下一个：{type(exc).__name__} {str(exc)[:150]}', flush=True)
+            time.sleep(3)
     print('\n三种形态都拿不到可用 session，需要人工过一次登录+二次验证：跑 login_with_2fa.py', flush=True)
     sys.exit(1)
