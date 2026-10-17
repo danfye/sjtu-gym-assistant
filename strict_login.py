@@ -8,6 +8,7 @@ import os
 import subprocess
 import sys
 import time
+from datetime import date, timedelta
 from pathlib import Path
 
 BASE = Path(__file__).resolve().parent
@@ -26,7 +27,17 @@ from cookie_store import save_cookie
 from venue_map import VENUE_MAP
 
 VM = VENUE_MAP['stu_gym']
-PROBE_DATE = os.environ.get('PROBE_DATE', '2026-10-16')
+# 验证日期绝不能写死：写死后一旦那一天变成过去（或还没放号），会话明明有效也会被判成失效，
+# 2026-10-17 就是这样连续弹了一下午 auth_required。默认改用“今天+3”，probe 里还会自动换日期重试。
+PROBE_DATE = os.environ.get('PROBE_DATE', '').strip()
+
+
+def probe_dates():
+    base = PROBE_DATE
+    if base:
+        return [base]
+    today = date.today()
+    return [(today + timedelta(days=n)).isoformat() for n in (3, 5, 7, 1, 2)]
 PW = os.environ.get('JACCOUNT_PASSWORD', '')
 UN = os.environ.get('JACCOUNT_USERNAME', '')
 PROFILE = str(BASE / 'chrome-profile')
@@ -60,16 +71,24 @@ def harvest(drv):
 
 
 def probe(cookie):
-    """真实判据：能不能拿到 dateId。"""
+    """真实判据：能不能拿到 dateId。依次试几个日期，避免写死的日期变成过去后误判会话失效。"""
     if not cookie:
         return False, 'no cookie'
-    try:
-        d = query_date_ids(cookie, VM['venTypeId'], VM['venueId'], PROBE_DATE)
-        if d:
-            return True, f'dateIds={len(d)}'
-        return False, 'dateIds=0'
-    except Exception as exc:
-        return False, f'{type(exc).__name__}: {str(exc)[:80]}'
+    last = 'dateIds=0'
+    for d in probe_dates():
+        try:
+            got = query_date_ids(cookie, VM['venTypeId'], VM['venueId'], d)
+            if got:
+                return True, f'dateIds={len(got)} @{d}'
+            last = f'dateIds=0 @{d}'
+        except Exception as exc:
+            msg = str(exc)
+            if '每日请求超过限制' in msg or 'Daily request exceeds' in msg:
+                return False, f'今日配额用尽 @{d}'
+            last = f'{type(exc).__name__}: {msg[:70]} @{d}'
+            if '未登录' in msg or '登录超时' in msg:
+                return False, last   # 确实是会话失效，不必再试别的日期
+    return False, last
 
 
 def try_login(headless: bool, anti_detect: bool, label: str):

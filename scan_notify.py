@@ -222,11 +222,14 @@ def scan_once(cookie: str, targets, session):
         elif 'dateId not found' in note:
             log(f'  - {key}: 空 ({note})')
             statuses.append('nodateid')
+        elif 'field situation empty' in note:
+            log(f'  - {key}: 接口没返回排期数据 ({note})')
+            statuses.append('noresult')
         else:
             log(f'  - {key}: 空 ({note or "no slot"})')
-            statuses.append('empty')
+            statuses.append('full')   # 正常返回、只是售罄，不能当成“站点没数据”
     dead = bool(statuses) and all(s == 'nodateid' for s in statuses)
-    all_empty = bool(statuses) and all(s in ('empty', 'nodateid') for s in statuses) and 'empty' in statuses
+    all_empty = bool(statuses) and all(s in ('noresult', 'nodateid') for s in statuses) and 'noresult' in statuses
     return found, dead, all_empty
 
 
@@ -403,8 +406,9 @@ def main():
             last = state.get('_auth_notify_ts', 0)
             if time.time() - last > AUTH_NOTIFY_COOLDOWN_S:
                 notify_progress('auth_required',
-                                'jAccount 会话失效且自动重登失败，需要你再做一次登录+二次验证：跑 login_with_2fa.py',
-                                sound='Basso')
+                                '拿不到可用会话（多数是 profile 里会话过期，不一定还要二次验证）。'
+                                '先手动跑 harvest_session.py，不行再跑 login_with_2fa.py',
+                                repeat=False)
                 state['_auth_notify_ts'] = time.time()
                 save_state(state)
             log('5 分钟后重试登录，期间扫描无意义')
