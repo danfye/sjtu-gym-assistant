@@ -43,6 +43,7 @@ MAX_LOG_BYTES = 2_000_000
 MAX_NOTIFS = 20
 RENOTIFY_COOLDOWN_S = 600          # 同一时段持续有空时，最多 10 分钟提醒一次
 AUTH_NOTIFY_COOLDOWN_S = 1800      # 需要重新验证这类提醒半小时最多一次
+STALL_NOTIFY_S = 1800              # 连续 30 分钟拿不到真实数据 → 提醒“在空转”
 
 _uk = os.environ.get('JACCOUNT_USERNAME', '')
 _pk = os.environ.get('JACCOUNT_PASSWORD', '')
@@ -230,7 +231,8 @@ def scan_once(cookie: str, targets, session):
             statuses.append('full')   # 正常返回、只是售罄，不能当成“站点没数据”
     dead = bool(statuses) and all(s == 'nodateid' for s in statuses)
     all_empty = bool(statuses) and all(s in ('noresult', 'nodateid') for s in statuses) and 'noresult' in statuses
-    return found, dead, all_empty
+    real_data = any(s in ('full', 'avail') for s in statuses)   # 只要有一个目标拿到真实排期，就算这一轮是有效的
+    return found, dead, all_empty, real_data
 
 
 def refresh_cookie(reason: str):
@@ -331,6 +333,9 @@ def main():
     log(f'使用 cookie（保存于 {load_cookie()[1]}）')
 
     state = load_state()
+    if '_last_ok_ts' not in state:
+        state['_last_ok_ts'] = time.time()   # 新进程别一上来就报“空转几十年”
+        save_state(state)
     session = requests.Session()
     try:
         from backend_api import warmup_session
@@ -345,13 +350,13 @@ def main():
         round_no += 1
         log(f'第 {round_no} 轮')
         try:
-            results, dead, all_empty = scan_once(cookie, targets, session)
+            results, dead, all_empty, real_data = scan_once(cookie, targets, session)
         except AuthError as exc:
             log(f'认证失效：{str(exc)[:150]}')
-            results, dead, all_empty = {}, True, False
+            results, dead, all_empty, real_data = {}, True, False, False
         except Exception as exc:
             log(f'本轮异常：{type(exc).__name__} {str(exc)[:200]}')
-            results, dead, all_empty = {}, False, False
+            results, dead, all_empty, real_data = {}, False, False, False
 
         if dead:
             # 用官方 validate_cookie 确认一次，避免把“日期尚未放号”这类正常空结果误判成失效而狂重登
@@ -424,7 +429,20 @@ def main():
                 except Exception:
                     alive = False
                 if alive:
-                    log(f'连续 {empty_streak} 轮排期为空，但会话仍有效，判断为站点侧暂无数据')
+                    st_now, why = quota_state(cookie, targets[0][0])
+                    if st_now == 'quota':
+                        nxt = datetime.now().replace(hour=0, minute=10, second=0, microsecond=0) + timedelta(days=1)
+                        wait_s = (nxt - datetime.now()).total_seconds()
+                        log(f'排期为空的原因是今日请求配额用尽（{why}），休眠到 {nxt:%m-%d %H:%M}')
+                        notify_progress('quota_exhausted',
+                                        f'今日请求配额已用尽（{why}），扫描休眠约 {wait_s/3600:.1f} 小时，'
+                                        f'到 {nxt:%m-%d %H:%M} 自动恢复',
+                                        repeat=False)
+                        state['_last_ok_ts'] = time.time()
+                        save_state(state)
+                        time.sleep(max(60.0, wait_s))
+                        continue
+                    log(f'连续 {empty_streak} 轮排期为空，会话有效且未触发配额，判断为站点侧暂无数据')
                 else:
                     log(f'连续 {empty_streak} 轮排期为空且会话校验失败，按失效处理')
                     new = refresh_cookie('排期连续为空')
@@ -439,6 +457,20 @@ def main():
                     continue
         else:
             empty_streak = 0
+
+        # 看门狗：只要连续 30 分钟没拿到过一次真实数据，就明确提醒“我在空转”，不再让人自己猜
+        if real_data:
+            state['_last_ok_ts'] = time.time()
+            save_state(state)
+        last_ok = state.get('_last_ok_ts', 0)
+        if time.time() - last_ok > STALL_NOTIFY_S:
+            log(f'已经 {(time.time()-last_ok)/60:.0f} 分钟没拿到真实数据，提醒一次')
+            notify_progress('stalled',
+                            f'扫描已空转 {(time.time()-last_ok)/60:.0f} 分钟（会话或站点问题），'
+                            '现在没有可靠监测；需要时手动跑 harvest_session.py 或 login_with_2fa.py',
+                            repeat=False)
+            state['_last_ok_ts'] = time.time()   # 重新计时，避免每轮都弹
+            save_state(state)
 
         for key, items in results.items():
             st = state.get(key, {})
