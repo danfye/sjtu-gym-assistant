@@ -290,7 +290,10 @@ def situation_probe_msg(cookie: str, date_str: str, session=None):
     except Exception as exc:
         return f'{type(exc).__name__} {str(exc)[:60]}', None
     if not did:
-        return 'no-dateId', None
+        # 拿不到 dateId 的原因可能是限流、也可能是真的没放号 —— 单发一次原始请求把服务端回话取回来，
+        # 否则上层只能盲目去登录（登录本身要发几十个请求，限流时只会更糟）。
+        st_now, why_now = quota_state(cookie, date_str)
+        return (why_now or 'no-dateId'), None
     try:
         r = s.post(f"{API_BASE}/manage/fieldDetail/queryFieldSituation",
                    json={'fieldType': vm['venTypeId'], 'date': date_str, 'venueId': vm['venueId'], 'dateId': did},
@@ -352,10 +355,20 @@ def main():
         cookie, saved_at = load_cookie()
         if cookie and validate_cookie(cookie, 'stu_gym', targets[0][0]):
             break
+        msg_s, _d = situation_probe_msg(cookie or '', targets[0][0])
+        if '请求过于频繁' in msg_s or '每日请求超过限制' in msg_s:
+            log(f'接口处于限流中（{msg_s}），15 分钟内不做登录尝试')
+            time.sleep(900)
+            continue
         cookie = refresh_cookie('启动时 cookie 缺失或已失效')
         if not cookie:
-            log('重登未成功，90 秒后重试（进程不退出）')
-            time.sleep(90)
+            fails = [t for t in state.get('_boot_fails', []) if time.time() - t < 3600]
+            fails.append(time.time())
+            state['_boot_fails'] = fails
+            save_state(state)
+            gap = 1800 if len(fails) >= 3 else 90   # 连败三次就退到 30 分钟，别整夜 hammer 站点
+            log(f'重登未成功（一小时内第 {len(fails)} 次），{gap} 秒后重试（进程不退出）')
+            time.sleep(gap)
     log(f'使用 cookie（保存于 {load_cookie()[1]}）')
 
     state = load_state()
@@ -377,6 +390,13 @@ def main():
         log(f'第 {round_no} 轮')
         # 每轮先单发一次排期查询：撞配额就直接休眠，别让 20 次重试把请求量放大成上百个
         msg0, _data0 = situation_probe_msg(cookie, targets[0][0], session)
+        if '请求过于频繁' in msg0:
+            # 短窗口节流：越急越撞。退避 15 分钟，且不去尝试登录（登录本身要发几十个请求）
+            log(f'被短窗口节流（{msg0}），退避 900 秒，期间不登录不轮询')
+            state['_last_ok_ts'] = time.time()   # 节流不算空转故障，别触发看门狗
+            save_state(state)
+            time.sleep(900)
+            continue
         if '每日请求超过限制' in msg0:
             nxt = datetime.now().replace(hour=0, minute=10, second=0, microsecond=0)
             if nxt <= datetime.now():
@@ -403,6 +423,13 @@ def main():
             results, dead, all_empty, real_data = {}, False, False, False
 
         if dead:
+            if '请求过于频繁' in msg0 or '每日请求超过限制' in msg0:
+                # 拿不到 dateId 是限流造成的，不是会话失效 —— 这时去登录只会让限流更久
+                log(f'dateId 全空但原因是限流（{msg0}），不尝试登录，15 分钟后再看')
+                state['_last_ok_ts'] = time.time()
+                save_state(state)
+                time.sleep(900)
+                continue
             # 用官方 validate_cookie 确认一次，避免把“日期尚未放号”这类正常空结果误判成失效而狂重登
             try:
                 alive = validate_cookie(cookie, 'stu_gym', targets[0][0])

@@ -54,6 +54,46 @@ def _children(pid):
     return [int(x) for x in out.stdout.split() if x.strip().isdigit()]
 
 
+def _comm(pid):
+    """进程的真实可执行路径。用来区分“真的是 Chrome/chromedriver”和“命令行里恰好提到这些字样的别的程序”。"""
+    try:
+        out = subprocess.run(['ps', '-o', 'comm=', '-p', str(pid)], capture_output=True, text=True, timeout=5)
+    except Exception:
+        return ''
+    return (out.stdout or '').strip()
+
+
+def _is_browser_exec(pid):
+    """只看可执行文件本身是不是 Chrome / Chrome Helper / chromedriver。
+
+    不能用 `pgrep -f` 的命令行匹配结果直接决定杀谁：任何进程的命令行里恰好出现
+    “Google Chrome.app/…”或项目路径（比如启动脚本、shell、编辑器）都会被误判，
+    之前就是这样把自己的父 shell 一起 SIGKILL 了。
+    """
+    c = _comm(pid)
+    if not c:
+        return False
+    if c.endswith('/chromedriver'):
+        return True
+    return 'Google Chrome' in c and '.app/Contents' in c
+
+
+def _ancestors():
+    pids = set()
+    pid = os.getpid()
+    for _ in range(24):
+        try:
+            out = subprocess.run(['ps', '-o', 'ppid=', '-p', str(pid)], capture_output=True, text=True, timeout=5)
+            parent = int((out.stdout or '0').strip() or 0)
+        except Exception:
+            break
+        if parent <= 1 or parent in pids:
+            break
+        pids.add(parent)
+        pid = parent
+    return pids
+
+
 def _is_mine(pid, cmdline=None):
     cmd = cmdline if cmdline is not None else _cmd(pid)
     if not cmd:
@@ -151,9 +191,10 @@ def sweep_stale():
     """清掉上一轮泄漏的、属于本项目的 chromedriver / Chrome。返回被杀的 pid。"""
     if os.name != 'posix':
         return []
-    drivers = _pgrep('chromedriver', exact=True)
-    chromes = _pgrep(CHROME_PROC)
-    mine = {pid for pid in drivers + chromes if pid != os.getpid() and _is_mine(pid)}
+    drivers = [p for p in _pgrep('chromedriver', exact=True) if _is_browser_exec(p)]
+    chromes = [p for p in _pgrep(CHROME_PROC) if _is_browser_exec(p)]
+    keep_out = {os.getpid()} | _ancestors()      # 绝不动自己和自己的父进程（pgrep -f 会误伤 shell）
+    mine = {pid for pid in drivers + chromes if pid not in keep_out and _is_mine(pid)}
     # 父级兜底：调用方没给 Service(log_output=...) 时，chromedriver 的 cmdline 里没有项目路径，
     # 但它名下的 Chrome 是我们的 —— 这个 driver 必须一起收，否则它下次还会挂着一个僵尸会话。
     for pid in drivers:
