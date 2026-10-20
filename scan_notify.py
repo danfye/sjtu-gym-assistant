@@ -138,9 +138,9 @@ def burst_probe(cookie: str, date_str: str, hour: int, seconds: float = 16.0, ga
     end = time.time() + seconds
     while time.time() < end:
         try:
-            did = query_date_ids(cookie, vm['venTypeId'], vm['venueId'], date_str, session=s).get(date_str)
+            did = raw_date_ids(cookie, date_str, s)[0].get(date_str)
             if did:
-                pl, fid = query_field_situation(cookie, date_str, vm['venTypeId'], vm['venueId'], did, session=s)
+                pl, fid = raw_situation(cookie, date_str, did, s), None
                 if pl and (hour - 7) < len(pl[0]):
                     cell = pl[0][hour - 7]
                     reads += 1
@@ -186,9 +186,9 @@ def probe_streak(cookie: str, date_str: str, hour: int, need: int = 5, gap: floa
     for i in range(need):
         ok = False
         try:
-            did = query_date_ids(cookie, vm['venTypeId'], vm['venueId'], date_str, session=s).get(date_str)
+            did = raw_date_ids(cookie, date_str, s)[0].get(date_str)
             if did:
-                pl, _ = query_field_situation(cookie, date_str, vm['venTypeId'], vm['venueId'], did, session=s)
+                pl, _ = raw_situation(cookie, date_str, did, s), None
                 if pl and (hour - 7) < len(pl[0]):
                     c = pl[0][hour - 7]
                     ok = str(c.get('status')) == '0'
@@ -202,37 +202,107 @@ def probe_streak(cookie: str, date_str: str, hour: int, need: int = 5, gap: floa
     return True, need, need, last
 
 
-def scan_once(cookie: str, targets, session):
-    """返回 ({target: items}, 是否疑似会话失效)；AuthError 直接向上抛。
+def raw_date_ids(cookie: str, date_str: str, session=None):
+    """单次拿 dateId 映射（这个接口一次就返回约 8 个日期），不重试。返回 (映射, 服务端msg)。"""
+    vm = VENUE_MAP['stu_gym']
+    s = session or requests
+    try:
+        r = s.post(f"{API_BASE}/manage/fieldDetail/queryFieldReserveSituationIsFull",
+                   json={"date": date_str, "feildType": vm['venTypeId'], "id": vm['venueId']},
+                   headers=_headers(cookie), timeout=8)
+        j = r.json()
+        data = j.get('data') or []
+        return ({x.get('date'): x.get('dateId') for x in data if x.get('date') and x.get('dateId')},
+                str(j.get('msg') or ''))
+    except Exception as exc:
+        return {}, f'{type(exc).__name__} {str(exc)[:60]}'
 
-    服务端 cookie 失效时的表现是 query_date_ids 拿不到 dateId，并不抛异常，
-    所以用“所有目标都拿不到 dateId”作为失效信号。
+
+def raw_situation(cookie: str, date_str: str, date_id: str, session=None):
+    """单次拿某日排期矩阵，失败不重试（backend_api 那个版本会重试 20 次，限流时会把请求量放大十几倍）。"""
+    vm = VENUE_MAP['stu_gym']
+    s = session or requests
+    try:
+        r = s.post(f"{API_BASE}/manage/fieldDetail/queryFieldSituation",
+                   json={'fieldType': vm['venTypeId'], 'date': date_str, 'venueId': vm['venueId'], 'dateId': date_id},
+                   headers=_headers(cookie), timeout=8)
+        j = r.json()
+        data = j.get('data') or []
+        return [x.get('priceList', []) for x in data], str(j.get('msg') or '')
+    except Exception as exc:
+        return [], f'{type(exc).__name__} {str(exc)[:60]}'
+
+
+def scan_once(cookie: str, targets, session):
+    """一轮只发 1 + 目标日期数 个请求：一次 dateId 映射 + 每个日期一次排期。
+
+    返回 (found, dead, all_empty, real_data, throttle_msg)。throttle_msg 非空说明这一轮是被
+    限流挡住的，上层据此退避，而不是当成“会话失效”去登录（登录一次要发几十个请求）。
     """
+    vm = VENUE_MAP['stu_gym']
     found = {}
     statuses = []
+    throttle = ''
+    dates = sorted({d for d, _ in targets})
+    ids, msg = raw_date_ids(cookie, dates[0], session)
+    if '每日请求超过限制' in msg or '请求过于频繁' in msg:
+        return {}, False, True, False, msg
     for date_str, slot in targets:
-        task = {'venue_key': 'stu_gym', 'weekdays': [1, 2, 3, 4, 5, 6, 7], 'time_ranges': [slot]}
-        ok, msg, items = APP.check_task_availability(task, cookie, date_str, session=session)
         key = f'{date_str} {slot}'
+        date_id = ids.get(date_str)
+        if not date_id:
+            ids2, msg2 = raw_date_ids(cookie, date_str, session)
+            if '每日请求超过限制' in msg2 or '请求过于频繁' in msg2:
+                throttle = throttle or msg2
+            date_id = ids2.get(date_str)
+        if not date_id:
+            found[key] = []
+            log(f'  - {key}: 空 (未取到 dateId，可能未放号或会话失效)')
+            statuses.append('nodateid')
+            continue
+        price_lists, msg3 = raw_situation(cookie, date_str, date_id, session)
+        if '每日请求超过限制' in msg3 or '请求过于频繁' in msg3:
+            throttle = throttle or msg3
+        if not price_lists or not price_lists[0]:
+            found[key] = []
+            log(f'  - {key}: 接口没返回排期数据 ({msg3 or "空 data"})')
+            statuses.append('noresult')
+            continue
+        h1, h2 = (slot.split('-') + [''])[:2]
+        try:
+            h1, h2 = int(h1), int(h2)
+        except ValueError:
+            found[key] = []
+            statuses.append('full')
+            continue
+        items = []
+        for hour in range(h1, h2):
+            row = hour - 7
+            if row < 0 or row >= len(price_lists[0]):
+                continue
+            for f_idx, pl in enumerate(price_lists):
+                cell = pl[row] if row < len(pl) else None
+                if not cell or str(cell.get('status')) != '0':
+                    continue
+                items.append({
+                    'venue_key': 'stu_gym', 'display': vm.get('display', 'stu_gym'),
+                    'date': date_str, 'hour': hour, 'time': f'{hour}:00-{hour+1}:00',
+                    'seat_idx': f_idx, 'site_name': f'场地{f_idx + vm["name_start_index"]}',
+                    'field_id': None, 'price': cell.get('price', '0'),
+                    'count': cell.get('count'), 'has_sign': bool(cell.get('sign')),
+                })
         found[key] = items
-        note = msg if isinstance(msg, str) else ''
         if items:
             seats = ', '.join(f"{it['time']} {it['site_name']}(¥{it.get('price', '0')})" for it in items[:4])
             log(f'  + {key}: 有 {len(items)} 个 -> {seats}')
             statuses.append('avail')
-        elif 'dateId not found' in note:
-            log(f'  - {key}: 空 ({note})')
-            statuses.append('nodateid')
-        elif 'field situation empty' in note:
-            log(f'  - {key}: 接口没返回排期数据 ({note})')
-            statuses.append('noresult')
         else:
-            log(f'  - {key}: 空 ({note or "no slot"})')
-            statuses.append('full')   # 正常返回、只是售罄，不能当成“站点没数据”
+            log(f'  - {key}: 空 (售罄)')
+            statuses.append('full')
     dead = bool(statuses) and all(s == 'nodateid' for s in statuses)
     all_empty = bool(statuses) and all(s in ('noresult', 'nodateid') for s in statuses) and 'noresult' in statuses
-    real_data = any(s in ('full', 'avail') for s in statuses)   # 只要有一个目标拿到真实排期，就算这一轮是有效的
-    return found, dead, all_empty, real_data
+    real_data = any(s in ('full', 'avail') for s in statuses)
+    return found, dead, all_empty, real_data, throttle
 
 
 def refresh_cookie(reason: str):
@@ -284,7 +354,7 @@ def situation_probe_msg(cookie: str, date_str: str, session=None):
     vm = VENUE_MAP['stu_gym']
     s = session or requests
     try:
-        did = query_date_ids(cookie, vm['venTypeId'], vm['venueId'], date_str, session=s).get(date_str)
+        did = raw_date_ids(cookie, date_str, s)[0].get(date_str)
     except AuthError:
         raise
     except Exception as exc:
@@ -388,39 +458,36 @@ def main():
         wait_until_active()
         round_no += 1
         log(f'第 {round_no} 轮')
-        # 每轮先单发一次排期查询：撞配额就直接休眠，别让 20 次重试把请求量放大成上百个
-        msg0, _data0 = situation_probe_msg(cookie, targets[0][0], session)
-        if '请求过于频繁' in msg0:
-            # 短窗口节流：越急越撞。退避 15 分钟，且不去尝试登录（登录本身要发几十个请求）
-            log(f'被短窗口节流（{msg0}），退避 900 秒，期间不登录不轮询')
-            state['_last_ok_ts'] = time.time()   # 节流不算空转故障，别触发看门狗
-            save_state(state)
-            time.sleep(900)
-            continue
-        if '每日请求超过限制' in msg0:
-            nxt = datetime.now().replace(hour=0, minute=10, second=0, microsecond=0)
-            if nxt <= datetime.now():
-                nxt += timedelta(days=1)
-            wait_s = (nxt - datetime.now()).total_seconds()
-            log(f'排期接口今日配额已用尽，休眠 {wait_s/3600:.1f} 小时到 {nxt:%m-%d %H:%M}')
-            if time.time() - state.get('_quota_notify_ts', 0) > AUTH_NOTIFY_COOLDOWN_S:
-                notify_progress('quota_exhausted',
-                                f'排期接口今日请求配额用尽，扫描休眠到 {nxt:%m-%d %H:%M}'
-                                f'（约 {wait_s/3600:.1f} 小时后自动恢复）',
-                                repeat=False)
-                state['_quota_notify_ts'] = time.time()
-                state['_last_ok_ts'] = time.time()
-                save_state(state)
-            time.sleep(max(60.0, wait_s))
-            continue
         try:
-            results, dead, all_empty, real_data = scan_once(cookie, targets, session)
+            results, dead, all_empty, real_data, throttle = scan_once(cookie, targets, session)
         except AuthError as exc:
             log(f'认证失效：{str(exc)[:150]}')
-            results, dead, all_empty, real_data = {}, True, False, False
+            results, dead, all_empty, real_data, throttle = {}, True, False, False, ''
         except Exception as exc:
             log(f'本轮异常：{type(exc).__name__} {str(exc)[:200]}')
-            results, dead, all_empty, real_data = {}, False, False, False
+            results, dead, all_empty, real_data, throttle = {}, False, False, False, ''
+
+        if throttle:
+            # 限流不是会话失效：这时去登录只会把限流拖得更久（一次登录几十个请求）
+            state['_last_ok_ts'] = time.time()
+            save_state(state)
+            if '每日请求超过限制' in throttle:
+                nxt = datetime.now().replace(hour=0, minute=10, second=0, microsecond=0)
+                if nxt <= datetime.now():
+                    nxt += timedelta(days=1)
+                wait_s = (nxt - datetime.now()).total_seconds()
+                log(f'今日配额已用尽（{throttle}），休眠 {wait_s/3600:.1f} 小时到 {nxt:%m-%d %H:%M}')
+                if time.time() - state.get('_quota_notify_ts', 0) > AUTH_NOTIFY_COOLDOWN_S:
+                    notify_progress('quota_exhausted',
+                                    f'今日请求配额已用尽，扫描休眠到 {nxt:%m-%d %H:%M}（约 {wait_s/3600:.1f} 小时后恢复）',
+                                    repeat=False)
+                    state['_quota_notify_ts'] = time.time()
+                    save_state(state)
+                time.sleep(max(60.0, wait_s))
+            else:
+                log(f'被短窗口节流（{throttle}），退避 900 秒')
+                time.sleep(900)
+            continue
 
         if dead:
             if '请求过于频繁' in msg0 or '每日请求超过限制' in msg0:
