@@ -374,6 +374,36 @@ def situation_probe_msg(cookie: str, date_str: str, session=None):
         return f'{type(exc).__name__} {str(exc)[:60]}', None
 
 
+def auto_targets():
+    """按课表滚动生成目标（AUTO_SCHEDULE=1）。
+
+    课表文件超过 6 天会自动重抓一次：登教务只用于读取课表，会弹一次 Chrome 窗口。
+    """
+    try:
+        import gym_windows as GW
+        sched = GW.load_schedule() or {}
+        upd = str(sched.get('updated_at') or '')
+        stale = True
+        try:
+            age = (datetime.now() - datetime.strptime(upd, '%Y-%m-%dT%H:%M:%S')).total_seconds()
+            stale = age > 6 * 86400
+        except ValueError:
+            pass
+        if stale and os.environ.get('REFRESH_SCHEDULE', '1') == '1':
+            log('课表已超过 6 天，重新抓取（弹一次 Chrome 登录教务，只读课表）')
+            for script in ('fetch_timetable.py', 'parse_timetable.py'):
+                try:
+                    r = subprocess.run([sys.executable, str(BASE / script)], cwd=str(BASE),
+                                       stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT, timeout=900)
+                    log(f'{script} 退出码 {r.returncode}')
+                except Exception as exc:
+                    log(f'{script} 失败：{type(exc).__name__} {str(exc)[:100]}')
+        return GW.targets_spec()
+    except Exception as exc:
+        log(f'按课表生成目标失败，沿用原目标：{type(exc).__name__} {str(exc)[:120]}')
+        return ''
+
+
 def wait_until_active():
     """只在活跃时段（默认 07:00-23:00）发请求，避免凌晨白白消耗每日配额。
 
@@ -414,9 +444,16 @@ def main():
     BC.install_handlers(include_atexit=False)
 
     targets = parse_targets(args.targets) or DEFAULT_TARGETS
+    auto = os.environ.get('AUTO_SCHEDULE', '') == '1'
+    cur_day = datetime.now().date()
+    if auto:
+        got = parse_targets(auto_targets())
+        if got:
+            targets = got
     interval = max(15.0, args.interval)
     log('=== 扫描启动：只查不买 ===')
-    log('目标：' + ' | '.join(f'{d} {t}' for d, t in targets) + f'；每 {interval:.0f}s 一轮')
+    log(('[按课表自动]' if auto else '[手动]') + '目标：' + ' | '.join(f'{d} {t}' for d, t in targets)
+        + f'；每 {interval:.0f}s 一轮')
 
     # 启动时没有可用会话就反复重试，绝不退出（2026-10-16 教训：原来失败即 return，结果白等一天）
     cookie = None
@@ -456,6 +493,12 @@ def main():
     empty_streak = 0
     while True:
         wait_until_active()
+        if auto and datetime.now().date() != cur_day:
+            cur_day = datetime.now().date()
+            got = parse_targets(auto_targets())
+            if got:
+                targets = got
+                log('新的一天，按课表更新目标：' + ' | '.join(f'{d} {t}' for d, t in targets))
         round_no += 1
         log(f'第 {round_no} 轮')
         try:

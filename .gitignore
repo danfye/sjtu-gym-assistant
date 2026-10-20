@@ -21,3 +21,7 @@ startup-error.log
 notifications.json
 notifications.txt
 detections.log
+
+# 课表与教务会话（个人数据，绝不入库）
+schedule.json
+i_sjtu_cookies.json
