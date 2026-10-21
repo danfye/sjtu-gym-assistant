@@ -456,6 +456,10 @@ def main():
         + f'；每 {interval:.0f}s 一轮')
 
     # 启动时没有可用会话就反复重试，绝不退出（2026-10-16 教训：原来失败即 return，结果白等一天）
+    state = load_state()
+    if '_last_ok_ts' not in state:
+        state['_last_ok_ts'] = time.time()
+        save_state(state)
     cookie = None
     while not cookie:
         wait_until_active()
@@ -704,3 +708,14 @@ if __name__ == '__main__':
         main()
     except KeyboardInterrupt:
         log('收到 Ctrl-C，退出')
+    except Exception:
+        # 未捕获异常会让监测静默停掉，这里落到日志并弹一次告警
+        import traceback
+        tb = traceback.format_exc()
+        log('扫描进程异常退出：\n' + tb[-1200:])
+        try:
+            notify_progress('crashed', '扫描进程异常退出，监测已停止：' + tb.strip().splitlines()[-1][:120],
+                            repeat=False)
+        except Exception:
+            pass
+        raise
