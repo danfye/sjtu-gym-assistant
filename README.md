@@ -1,85 +1,129 @@
-# 交大健身房预约助手（macOS 适配版）
+# 交大健身房预约助手
 
-上海交通大学「学生中心 · 健身房」预约平台的自动化脚本集合：自动登录 jAccount、查询指定日期时段的空位、按定点/回流策略尝试下单，并提供一个**只查不买**的持续扫描 + 本机告警工具。
+上海交通大学「学生中心 · 健身房」预约平台的自动化脚本。登录 jAccount 建立会话，查询指定日期时段的空位，按定点或回流策略下单，也能按课表自动挑出每天有空的时间段持续扫描并在本机告警。
 
-原始工程是一个 Windows x64 便携分享包（自带 Python 与 Tesseract）。本仓库保留其全部源码，并补上在 macOS 上的运行方式、二次验证登录流程、配额保护与告警策略。仓库不含原包的 `runtime/` 二进制目录。
+主体代码来自一个 Windows x64 便携分享包，本仓库保留其全部 Python 源码，并加入 macOS 运行入口、支持二次验证的登录流程、课表驱动的目标生成和扫描告警脚本。仓库不含原包的 `runtime/` 二进制目录。
 
 ## 功能
 
-- 图形界面 `ui.py`：填账号密码、选浏览器、仅登录、检测空位（不下单）、定点预约、回流抢占、扫描日期范围。
-- 命令行 `main.py --mode login|check|book|watch|scan7|all`，`check` 只查询不下单。
-- `scan_notify.py`：对指定的「日期 + 时段」组合持续轮询，命中后在本机弹告警，**全程不下单**。
-- `strict_login.py` / `login_with_2fa.py`：能真正拿到可用会话的登录方式（应对 jAccount 二次验证与风控）。
-- `venue_probe2.py`：抓前端真实请求，用来确认/更换场馆的 `venueId`。
+- 图形界面 `ui.py`：账号密码、浏览器选择、仅登录、检测空位、定点预约、回流抢占、日期范围扫描。
+- 命令行 `main.py --mode login|check|book|watch|scan7|all`，其中 `check` 只查询。
+- `scan_notify.py`：对指定「日期 + 时段」组合持续轮询，命中后在本机告警，不下单。
+- `harvest_session.py`、`strict_login.py`、`login_with_2fa.py`：三种登录路径，分别是复用浏览器已有会话、自动登录、以及需要人工扫码的二次验证。
+- `fetch_timetable.py`、`parse_timetable.py`、`gym_windows.py`：抓取并解析教务课表，生成每天的可扫时段。
+- `alert_helper.py`：本机对话框告警。
+- `browser_cleanup.py`：管理脚本自己启动的 Chrome 与 chromedriver 生命周期。
+- `venue_probe2.py`、`net_probe.py`：读取前端真实请求，用于确认场馆 `venueId` 和排查网络。
 
-## macOS 快速开始
+## 安装
+
+macOS：
 
 ```bash
 brew install tesseract
 python3 -m venv .venv
 .venv/bin/python -m pip install -r requirements.txt
-# 双击「启动预约助手-mac.command」即可打开图形界面
+# 双击「启动预约助手-mac.command」打开图形界面
 ```
 
-Windows 需要自备 Python 3.12 与 Tesseract-OCR 后 `pip install -r requirements.txt`，或直接使用原分享包自带的 `runtime/`。
+Windows：准备 Python 3.12 与 Tesseract-OCR，`pip install -r requirements.txt`，双击 `启动预约助手.bat`；或使用原分享包自带的 `runtime/`。
 
-`CHROME_BINARY` 和 `TESSERACT_PATH` 两个环境变量在非图形环境里必须显式给出：`portable_start.py` 会把 `TESSERACT_CMD` 指向 Windows 的 `.exe`，所以 macOS 下要靠 `TESSERACT_PATH` 兜底。
+macOS 下指定 Chrome 与 Tesseract 的位置：
 
-## jAccount 二次验证（重要）
+```bash
+export CHROME_BINARY="/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+export TESSERACT_PATH=/opt/homebrew/bin/tesseract
+export CHROME_USER_DATA_DIR="$PWD/chrome-profile"
+```
 
-现在账号密码 + 图形验证码通过后，jAccount 会强制**二次验证**（交我办/微信扫码，或邮箱/短信验证码）。原包的登录逻辑没有这一步的分支，表现为连续多轮失败、第 2 轮起全是空 message 的超时。
+域名解析不可用的网络环境再加两项：
 
-正确做法：
+```bash
+export CHROME_PROXY=http://127.0.0.1:7897
+export CHROME_HOST_RESOLVER="MAP sports.sjtu.edu.cn 202.120.35.148, MAP jaccount.sjtu.edu.cn 202.120.2.109"
+```
+
+## 登录
+
+首次使用需要人工过一次 jAccount 二次验证。脚本把流程带到验证页面，由使用者扫码或填验证码，勾选「信任此浏览器/应用，下次不再验证」，会话写入 `state/cookie.json`：
 
 ```bash
 JACCOUNT_USERNAME=... JACCOUNT_PASSWORD=... .venv/bin/python login_with_2fa.py
 ```
 
-它用持久化 profile 走到二次验证页，由你本人扫码或填验证码，并勾选「信任此浏览器/应用，下次不再验证」；成功后会话写入 `state/cookie.json`。
-
-自动重登只能用**有窗口 + 去自动化指纹**的形态（`strict_login.py`），`--headless=new` 会被判成新设备再次要求二次验证：
+后续维持会话按顺序尝试这两步：
 
 ```bash
-JACCOUNT_USERNAME=... JACCOUNT_PASSWORD=... .venv/bin/python strict_login.py
+.venv/bin/python harvest_session.py   # 复用浏览器里已有的会话
+.venv/bin/python strict_login.py      # 重新登录，取到的会话需通过排期查询验证
 ```
 
-## 只查不买的持续扫描
+自动登录采用有窗口且关闭自动化指纹的形态。
+
+## 扫描与告警
 
 ```bash
-SCAN_TARGETS="2026-10-17:7-22,2026-10-18:7-22" \
-JACCOUNT_USERNAME=... JACCOUNT_PASSWORD=... \
-.venv/bin/python scan_notify.py --interval 90
+AUTO_SCHEDULE=1 JACCOUNT_USERNAME=... JACCOUNT_PASSWORD=... \
+.venv/bin/python scan_notify.py --interval 240
 ```
 
-内置几条保护策略，都是实测踩出来的：
+`AUTO_SCHEDULE=1` 时目标由课表生成，每天 09:00 重算未来 7 天。固定目标直接给：
 
-- **每日请求配额**：接口会返回 `每日请求超过限制，无法获取`。轮询间隔别压到十秒级，默认 90 秒；一旦撞到配额会休眠到次日 00:10，连续 3 次重登失败同样休眠，不硬撞。
-- **活跃时段**：默认只在 07:00-23:00 发请求（`ACTIVE_START_HOUR` / `ACTIVE_END_HOUR`），`HOLD_UNTIL="YYYY-MM-DD HH:MM"` 可挂起到指定时间再开始。一次查询返回整天 15 个时段，扫全天和扫一小时花费相同。
-- **单次命中不可信**：同一段位在几十秒内会在 `status=0` 与 `-3` 之间反复横跳（他人锁位或后端缓存不一致），所以命中后要求连续 5 次读到可约才告警，抖动只写 `[slot_blink]` 记录。
-- **会话有效性判据**：`backend_api.validate_cookie` 在接口超时时会返回 True，不能当登录成功依据；本仓库以「查询接口能否拿到 `dateId`」为唯一判据。
-- 杀进程会留下占用 `chrome-profile` 的孤儿 Chrome：下次 Chrome 起不来报 `SessionNotCreatedException`，而且这个没有窗口的 headless Chrome 会让 macOS 关机卡住（Chrome 不响应退出请求）。所有会启动浏览器的入口都接了 `browser_cleanup.py`：正常 `quit()`、信号处理、起新浏览器前清扫残留，并按项目目录归属过滤，不会误杀你自己开的 Chrome。
+```bash
+SCAN_TARGETS="2026-10-21:13-22,2026-10-24:7-22" .venv/bin/python scan_notify.py --interval 240
+```
 
-告警走本机静默弹窗（`alert_helper.py`）+ `notifications.txt` 记录，不发声。如果需要在手机收到，可把 Server酱 / 飞书 / 企微任一 webhook 填进 `config.json` 的通知配置或图形界面里对应输入框。
+可调参数：
 
-## 接口字段含义
+| 环境变量 | 默认 | 作用 |
+| --- | --- | --- |
+| `SCAN_INTERVAL_S` / `--interval` | 240 | 轮询间隔秒数 |
+| `ACTIVE_START_HOUR` / `ACTIVE_END_HOUR` | 7 / 23 | 发请求的时段窗口 |
+| `HOLD_UNTIL` | 空 | `YYYY-MM-DD HH:MM`，在此之前完全不打接口 |
+| `SCAN_TARGETS` | 空 | `日期:起-止` 逗号分隔 |
+| `AUTO_SCHEDULE` | 0 | 置 1 时按课表生成目标 |
+| `REFRESH_SCHEDULE` | 1 | 课表超过 6 天时重抓 |
+| `CLASS_BUFFER_MIN` | 20 | 课程前后预留的通勤时间 |
+| `GYM_OPEN_HOUR` / `GYM_CLOSE_HOUR` | 12 / 22 | 健身房开放窗口 |
 
-`queryFieldSituation` 每个时段格子包含 `status` / `count` / `price` / `flag`：
+一次查询返回整天 15 个时段，扫全天与扫一小时调用量相同。会话是否可用以排期查询能否拿到 `dateId` 判定。命中需要连续 5 次复采仍为可约才提示，未通过的写入 `[slot_blink]`；提示时弹一个静默对话框，40 秒后仍有空位再补一个。告警落在本机对话框、`notifications.txt`、`notifications.json` 三处。需要在手机上接收的，把 Server酱 SendKey 或飞书、企业微信机器人 webhook 填进 `config.json` 的通知配置，或界面里对应的输入框。
+
+排期接口的调用量按日计限，撞上限时程序休眠到次日 00:10 继续。
+
+## 课表
+
+```bash
+JACCOUNT_USERNAME=... JACCOUNT_PASSWORD=... .venv/bin/python fetch_timetable.py
+.venv/bin/python parse_timetable.py
+```
+
+前者登录 i.sjtu 抓「个人课表查询」（菜单码 `N253508`）的页面 HTML，后者按占用网格展开表格，用交大节次时钟换算成 `schedule.json`，记录每门课的起止时间、周次范围和单双周。教务页面不给当前周次，周次由 `TERM_START`（第 1 教学周的周一，默认 `2026-09-07`）推算。
+
+## 接口字段
+
+排期矩阵每个格子含 `status`、`count`、`price`、`flag`：
 
 | status | 含义 |
 | --- | --- |
-| `0` | 可预约（`count` 为剩余名额） |
+| `0` | 可预约，`count` 为剩余名额 |
 | `-1` | 未到开放时间 |
 | `-2` | 时段已过 |
 | `-3` | 已售罄 |
 
-学生中心健身房开放时间 12:00-22:00，**每个小时只有 1 个名额**，回流窗口通常只有几十秒到一两分钟。
+学生中心健身房 12:00-22:00 开放，每小时 1 个名额。排期数据在进页面或切换日期时拉取。
+
+## 换场馆
+
+```bash
+.venv/bin/python venue_probe2.py "学生中心"
+```
+
+登录后点进对应场馆卡片，打印前端请求与 `venueId`，在 `venue_map.py` 增一条即可。
 
 ## 隐私
 
-- 仓库不收录 `state/`、`logs/`、`chrome-profile/`、`ui_settings.json`、`*.log`、`notifications.*`、`detections.log`，会话、Cookie、预约记录、账号密码都不会进版本库。
-- 账号密码只通过环境变量 `JACCOUNT_USERNAME` / `JACCOUNT_PASSWORD` 传给子进程，不落盘；界面里勾选「保存密码」才会写入本地 `ui_settings.json`（明文，不建议）。
-- `config.json` 里全部是 `${JACCOUNT_USERNAME}` 形式的环境变量占位符，没有真实凭据。
+`.gitignore` 排除了 `state/`、`logs/`、`chrome-profile/`、`ui_settings.json`、`schedule.json`、`i_sjtu_cookies.json` 与各类日志，会话、Cookie、预约记录、课表留在本机。账号密码经环境变量传给子进程；界面上的「保存密码」开关写入本地 `ui_settings.json`。`config.json` 中是 `${JACCOUNT_USERNAME}` 形式的环境变量占位符。
 
-## 免责
+## 说明
 
-仅供个人学习与自用。请遵守学校场馆预约规定，不要把高频请求当成常态，更不要多人共用同一账号刷位。`book` / `watch` / `scan7` 会尝试真实下单，产生学校系统里的实际订单，责任由使用者自负。原分享包及其自带库的许可归原作者。
+仅供个人使用。`book`、`watch`、`scan7` 会尝试下单，产生学校系统里的真实订单。原分享包及其自带库的许可归原作者。
