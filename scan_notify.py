@@ -41,6 +41,7 @@ STATE_FILE = BASE / 'scan_state.json'
 LOG_FILE = BASE / 'scan.log'
 MAX_LOG_BYTES = 2_000_000
 MAX_NOTIFS = 20
+REQUEST_SPACING_S = float(os.environ.get('REQUEST_SPACING_S', '1.2'))
 RENOTIFY_COOLDOWN_S = 600          # 同一时段持续有空时，最多 10 分钟提醒一次
 AUTH_NOTIFY_COOLDOWN_S = 1800      # 需要重新验证这类提醒半小时最多一次
 STALL_NOTIFY_S = 1800              # 连续 30 分钟拿不到真实数据 → 提醒“在空转”
@@ -183,6 +184,7 @@ def probe_streak(cookie: str, date_str: str, hour: int, need: int = 5, gap: floa
     """
     vm = VENUE_MAP['stu_gym']
     s = requests.Session()
+    last = '尚未采到数据'
     for i in range(need):
         ok = False
         try:
@@ -247,8 +249,12 @@ def scan_once(cookie: str, targets, session):
     ids, msg = raw_date_ids(cookie, dates[0], session)
     if '每日请求超过限制' in msg or '请求过于频繁' in msg:
         return {}, False, True, False, msg
+    by_date = {}
     for date_str, slot in targets:
-        key = f'{date_str} {slot}'
+        by_date.setdefault(date_str, []).append(slot)
+    for date_str in sorted(by_date):
+        slots = by_date[date_str]
+        keys = [f'{date_str} {s}' for s in slots]
         date_id = ids.get(date_str)
         if not date_id:
             ids2, msg2 = raw_date_ids(cookie, date_str, session)
@@ -256,49 +262,56 @@ def scan_once(cookie: str, targets, session):
                 throttle = throttle or msg2
             date_id = ids2.get(date_str)
         if not date_id:
-            found[key] = []
-            log(f'  - {key}: 空 (未取到 dateId，可能未放号或会话失效)')
+            for k in keys:
+                found[k] = []
+            log(f'  - {date_str}: 空 (未取到 dateId，可能未放号或会话失效)')
             statuses.append('nodateid')
             continue
+        # 一个日期只查一次排期，同一天的多个时段区间共用这份矩阵。
+        # 请求之间留一点间隔：一轮 9 个请求在 1 秒内打完会撞上“请求过于频繁”的突发速率限制。
+        time.sleep(REQUEST_SPACING_S)
         price_lists, msg3 = raw_situation(cookie, date_str, date_id, session)
         if '每日请求超过限制' in msg3 or '请求过于频繁' in msg3:
             throttle = throttle or msg3
         if not price_lists or not price_lists[0]:
-            found[key] = []
-            log(f'  - {key}: 接口没返回排期数据 ({msg3 or "空 data"})')
+            for k in keys:
+                found[k] = []
+            log(f'  - {date_str}: 接口没返回排期数据 ({msg3 or "空 data"})')
             statuses.append('noresult')
             continue
-        h1, h2 = (slot.split('-') + [''])[:2]
-        try:
-            h1, h2 = int(h1), int(h2)
-        except ValueError:
-            found[key] = []
-            statuses.append('full')
-            continue
-        items = []
-        for hour in range(h1, h2):
-            row = hour - 7
-            if row < 0 or row >= len(price_lists[0]):
+        day_hit = False
+        for slot in slots:
+            key = f'{date_str} {slot}'
+            h1, h2 = (slot.split('-') + [''])[:2]
+            try:
+                h1, h2 = int(h1), int(h2)
+            except ValueError:
+                found[key] = []
                 continue
-            for f_idx, pl in enumerate(price_lists):
-                cell = pl[row] if row < len(pl) else None
-                if not cell or str(cell.get('status')) != '0':
+            items = []
+            for hour in range(h1, h2):
+                row = hour - 7
+                if row < 0 or row >= len(price_lists[0]):
                     continue
-                items.append({
-                    'venue_key': 'stu_gym', 'display': vm.get('display', 'stu_gym'),
-                    'date': date_str, 'hour': hour, 'time': f'{hour}:00-{hour+1}:00',
-                    'seat_idx': f_idx, 'site_name': f'场地{f_idx + vm["name_start_index"]}',
-                    'field_id': None, 'price': cell.get('price', '0'),
-                    'count': cell.get('count'), 'has_sign': bool(cell.get('sign')),
-                })
-        found[key] = items
-        if items:
-            seats = ', '.join(f"{it['time']} {it['site_name']}(¥{it.get('price', '0')})" for it in items[:4])
-            log(f'  + {key}: 有 {len(items)} 个 -> {seats}')
-            statuses.append('avail')
-        else:
-            log(f'  - {key}: 空 (售罄)')
-            statuses.append('full')
+                for f_idx, pl in enumerate(price_lists):
+                    cell = pl[row] if row < len(pl) else None
+                    if not cell or str(cell.get('status')) != '0':
+                        continue
+                    items.append({
+                        'venue_key': 'stu_gym', 'display': vm.get('display', 'stu_gym'),
+                        'date': date_str, 'hour': hour, 'time': f'{hour}:00-{hour+1}:00',
+                        'seat_idx': f_idx, 'site_name': f'场地{f_idx + vm["name_start_index"]}',
+                        'field_id': None, 'price': cell.get('price', '0'),
+                        'count': cell.get('count'), 'has_sign': bool(cell.get('sign')),
+                    })
+            found[key] = items
+            if items:
+                day_hit = True
+                seats = ', '.join(f"{it['time']} {it['site_name']}(¥{it.get('price', '0')})" for it in items[:4])
+                log(f'  + {key}: 有 {len(items)} 个 -> {seats}')
+            else:
+                log(f'  - {key}: 空 (售罄)')
+        statuses.append('avail' if day_hit else 'full')
     dead = bool(statuses) and all(s == 'nodateid' for s in statuses)
     all_empty = bool(statuses) and all(s in ('noresult', 'nodateid') for s in statuses) and 'noresult' in statuses
     real_data = any(s in ('full', 'avail') for s in statuses)
