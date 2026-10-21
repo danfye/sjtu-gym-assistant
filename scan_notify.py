@@ -176,32 +176,62 @@ def quota_state(cookie: str, date_str: str):
         return 'unknown', str(exc)[:80]
 
 
-def probe_streak(cookie: str, date_str: str, hour: int, need: int = 5, gap: float = 4.0):
-    """连续确认：连续 need 次都读到 status=0 才算真有位。
+def sample_slot(cookie: str, date_str: str, hour: int, session=None):
+    """采一次某个(日期,整点)的状态，返回 ('open'|'closed'|'unknown', 描述)。
 
-    实测接口的 status 会在几十秒里 0 / -3 反复横跳（别人锁位抖动或多节点缓存不一致），
-    单次命中不可信，所以必须连续确认，避免狼来了。
+    'unknown' 专指请求被限流或拿不到排期数据 —— 这不能算“空位消失”。
+    2026-10-21 晚就是因为把 unknown 当成 not-open，压掉了六个真实窗口。
     """
     vm = VENUE_MAP['stu_gym']
+    s = session or requests
+    ids, msg = raw_date_ids(cookie, date_str, s)
+    if '每日请求超过限制' in msg or '请求过于频繁' in msg:
+        return 'unknown', msg
+    date_id = ids.get(date_str)
+    if not date_id:
+        return 'unknown', msg or '未取到 dateId'
+    price_lists, msg2 = raw_situation(cookie, date_str, date_id, s)
+    if not price_lists or not price_lists[0]:
+        return 'unknown', msg2 or '排期数据为空'
+    row = hour - 7
+    if row < 0 or row >= len(price_lists[0]):
+        return 'unknown', f'第 {hour} 点不在矩阵内'
+    cell = price_lists[0][row]
+    if not cell:
+        return 'unknown', '该格无数据'
+    desc = f"status={cell.get('status')} count={cell.get('count')}"
+    return ('open' if str(cell.get('status')) == '0' else 'closed'), desc
+
+
+def probe_streak(cookie: str, date_str: str, hour: int, need: int = 3, gap: float = 4.0):
+    """命中后再采几枪，把结果分成三档。
+
+    confirmed：need 次成功采到且全为可约，可以直接喊人。
+    seen：采到过可约，但没采够连续确认（多为站点限流占用了采样窗口）—— 仍然要喊，
+           漏报的代价远高于多弹一次。
+    blink：至少 2 次成功采到并且都不是可约，判为空位一闪即灭，不喊。
+
+    返回 (level, 采样成功次数, 可约次数, 最后一次描述)。
+    """
     s = requests.Session()
-    last = '尚未采到数据'
-    for i in range(need):
-        ok = False
-        try:
-            did = raw_date_ids(cookie, date_str, s)[0].get(date_str)
-            if did:
-                pl, _ = raw_situation(cookie, date_str, did, s), None
-                if pl and (hour - 7) < len(pl[0]):
-                    c = pl[0][hour - 7]
-                    ok = str(c.get('status')) == '0'
-                    last = f"status={c.get('status')} count={c.get('count')}"
-        except Exception as exc:
-            last = f'{type(exc).__name__} {str(exc)[:60]}'
-        if not ok:
-            return False, i + 1, i, last
-        if i < need - 1:
-            time.sleep(gap)
-    return True, need, need, last
+    opens = ok = 0
+    last = '未采到样本'
+    closes = 0
+    for i in range(need * 3):        # 最多 3 倍尝试，容忍其中的 unknown
+        outcome, last = sample_slot(cookie, date_str, hour, s)
+        if outcome == 'open':
+            opens += 1
+            ok += 1
+        elif outcome == 'closed':
+            closes += 1
+            ok += 1
+        if opens >= need:
+            return 'confirmed', ok, opens, last
+        if closes >= 2:
+            return 'blink', ok, opens, last
+        time.sleep(gap if outcome != 'unknown' else gap / 2)
+    level = 'seen' if opens else 'blink'
+    return level, ok, opens, last
 
 
 def raw_date_ids(cookie: str, date_str: str, session=None):
@@ -686,18 +716,21 @@ def main():
                 seats = items[0]
                 detail = f'{seats["date"]} {seats["time"]} {seats["site_name"]}'
                 # 先连续确认 5 次（约 16 秒），抖动/横跳的不打扰人
-                confirmed, reads_n, hits_n, last = probe_streak(cookie, seats['date'], seats['hour'])
-                if not confirmed:
-                    log(f'  {key}: 命中未连续确认（第 {reads_n} 次变成 {last}），判为抖动，不弹框')
+                level, reads_n, hits_n, last = probe_streak(cookie, seats['date'], seats['hour'])
+                if level == 'blink':
+                    log(f'  {key}: 命中后复采到 {reads_n} 次，其中 {hits_n} 次可约（末次 {last}），判为抖动，不弹框')
                     with open(NOTIF_TXT, 'a', encoding='utf-8') as f:
                         f.write(f"{datetime.now().isoformat(timespec='seconds')} [slot_blink] {key} —— "
-                                f"连续确认失败：第 {reads_n} 次为 {last}，未弹告警\n")
+                                f"复采 {reads_n} 次仅 {hits_n} 次可约，末次 {last}，未弹告警\n")
                     state[key] = {'available': False, 'notified_ts': st.get('notified_ts', 0),
                                   'count': 0, 'blink': True}
                     save_state(state)
                     continue
-                notify_progress('slot_available', f'连续 {reads_n} 次确认可约：{key} —— {detail}，马上刷新页面下单',
-                                repeat=False)
+                if level == 'confirmed':
+                    head = f'连续 {hits_n} 次确认可约：{key}'
+                else:
+                    head = f'采到空位但站点限流未采够确认（{hits_n} 次可约）：{key}'
+                notify_progress('slot_available', f'{head} —— {detail}，马上刷新页面下单', repeat=False)
                 # 随后密集复采 40 秒：如果还在，说明你有时间，再补一次提醒；同时留下原始证据
                 hits, reads = burst_probe(cookie, seats['date'], seats['hour'], seconds=40, gap=5)
                 with open(NOTIF_TXT, 'a', encoding='utf-8') as f:
