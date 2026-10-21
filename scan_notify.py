@@ -506,7 +506,10 @@ def main():
         round_no += 1
         log(f'第 {round_no} 轮')
         try:
-            results, dead, all_empty, real_data, throttle = scan_once(cookie, targets, session)
+            # 每轮轮换起点：短窗口限流只会打到一轮里排在后面的日期，固定顺序会让
+            # 最后那一两个日期永远查不到
+            rot = targets[round_no % len(targets):] + targets[:round_no % len(targets)]
+            results, dead, all_empty, real_data, throttle = scan_once(cookie, rot, session)
         except AuthError as exc:
             log(f'认证失效：{str(exc)[:150]}')
             results, dead, all_empty, real_data, throttle = {}, True, False, False, ''
@@ -514,32 +517,37 @@ def main():
             log(f'本轮异常：{type(exc).__name__} {str(exc)[:200]}')
             results, dead, all_empty, real_data, throttle = {}, False, False, False, ''
 
-        if throttle:
-            # 限流不是会话失效：这时去登录只会把限流拖得更久（一次登录几十个请求）
+        if throttle and '每日请求超过限制' in throttle:
+            # 每日配额是全局的，本轮是否拿到过数据都要休眠到次日
             state['_last_ok_ts'] = time.time()
             save_state(state)
-            if '每日请求超过限制' in throttle:
-                nxt = datetime.now().replace(hour=0, minute=10, second=0, microsecond=0)
-                if nxt <= datetime.now():
-                    nxt += timedelta(days=1)
-                wait_s = (nxt - datetime.now()).total_seconds()
-                log(f'今日配额已用尽（{throttle}），休眠 {wait_s/3600:.1f} 小时到 {nxt:%m-%d %H:%M}')
-                if time.time() - state.get('_quota_notify_ts', 0) > AUTH_NOTIFY_COOLDOWN_S:
-                    notify_progress('quota_exhausted',
-                                    f'今日请求配额已用尽，扫描休眠到 {nxt:%m-%d %H:%M}（约 {wait_s/3600:.1f} 小时后恢复）',
-                                    repeat=False)
-                    state['_quota_notify_ts'] = time.time()
-                    save_state(state)
-                time.sleep(max(60.0, wait_s))
-            else:
-                log(f'被短窗口节流（{throttle}），退避 900 秒')
-                time.sleep(900)
+            nxt = datetime.now().replace(hour=0, minute=10, second=0, microsecond=0)
+            if nxt <= datetime.now():
+                nxt += timedelta(days=1)
+            wait_s = (nxt - datetime.now()).total_seconds()
+            log(f'今日配额已用尽（{throttle}），休眠 {wait_s/3600:.1f} 小时到 {nxt:%m-%d %H:%M}')
+            if time.time() - state.get('_quota_notify_ts', 0) > AUTH_NOTIFY_COOLDOWN_S:
+                notify_progress('quota_exhausted',
+                                f'今日请求配额已用尽，扫描休眠到 {nxt:%m-%d %H:%M}（约 {wait_s/3600:.1f} 小时后恢复）',
+                                repeat=False)
+                state['_quota_notify_ts'] = time.time()
+                save_state(state)
+            time.sleep(max(60.0, wait_s))
+            continue
+
+        if throttle and not real_data:
+            # 整轮都被短窗口节流才退避。只有靠后的几个日期被限流时继续跑，
+            # 否则每 5 分钟就会被拖停 15 分钟。
+            state['_last_ok_ts'] = time.time()
+            save_state(state)
+            log(f'被短窗口节流（{throttle}），退避 900 秒')
+            time.sleep(900)
             continue
 
         if dead:
-            if '请求过于频繁' in msg0 or '每日请求超过限制' in msg0:
+            if '请求过于频繁' in throttle or '每日请求超过限制' in throttle:
                 # 拿不到 dateId 是限流造成的，不是会话失效 —— 这时去登录只会让限流更久
-                log(f'dateId 全空但原因是限流（{msg0}），不尝试登录，15 分钟后再看')
+                log(f'dateId 全空但原因是限流（{throttle}），不尝试登录，15 分钟后再看')
                 state['_last_ok_ts'] = time.time()
                 save_state(state)
                 time.sleep(900)
