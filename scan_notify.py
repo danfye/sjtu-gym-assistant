@@ -748,6 +748,11 @@ def main():
                 save_state(state)
             elif not now_avail and was_avail:
                 log(f'  {key}: 刚才的空位已被占，状态复位')
+                # 复验的否定结果也要落到 notifications.txt，否则同步通道只看到告警看不到下文
+                secs = time.time() - st.get('notified_ts', time.time())
+                with open(NOTIF_TXT, 'a', encoding='utf-8') as f:
+                    f.write(f"{datetime.now().isoformat(timespec='seconds')} [slot_gone] {key} —— "
+                            f"告警后 {secs:.0f} 秒的下一轮已不可约（窗口约 {secs:.0f} 秒）\n")
                 state[key] = {'available': False, 'notified_ts': st.get('notified_ts', 0), 'count': 0}
             elif now_avail:
                 state[key]['count'] = len(items)
