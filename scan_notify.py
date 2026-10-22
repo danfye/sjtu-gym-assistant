@@ -731,16 +731,21 @@ def main():
                 else:
                     head = f'采到空位但站点限流未采够确认（{hits_n} 次可约）：{key}'
                 notify_progress('slot_available', f'{head} —— {detail}，马上刷新页面下单', repeat=False)
-                # 随后密集复采 40 秒：如果还在，说明你有时间，再补一次提醒；同时留下原始证据
-                hits, reads = burst_probe(cookie, seats['date'], seats['hour'], seconds=40, gap=5)
+                # 不再在告警后现场复采：那会阻塞主循环几十秒、额外打十几个请求，
+                # 而且采不到数据时会被误读成“空位没了”。复验交给下一轮正常轮询。
+                state[key] = {'available': True, 'notified_ts': time.time(), 'still_open_sent': False,
+                              'count': len(items), 'seats': [it['site_name'] for it in items]}
+            elif now_avail and st.get('notified_ts') and not st.get('still_open_sent'):
+                # 告警后的下一轮仍然可约，才补一条“空位仍在”
+                secs = time.time() - st.get('notified_ts', 0)
                 with open(NOTIF_TXT, 'a', encoding='utf-8') as f:
                     f.write(f"{datetime.now().isoformat(timespec='seconds')} [slot_verify] {key} —— "
-                            f"提醒后 40 秒内 {reads} 次复采 {hits} 次仍 status=0\n")
-                log(f'  复采：40 秒内 {reads} 次里 {hits} 次仍可约')
-                if hits >= 3:
-                    notify_progress('slot_still_open', f'空位仍在（{reads} 次复采 {hits} 次可约）：{key}', repeat=False)
-                state[key] = {'available': True, 'notified_ts': time.time(),
-                              'count': len(items), 'seats': [it['site_name'] for it in items]}
+                            f"告警后 {secs:.0f} 秒的下一轮仍可约（{len(items)} 个）\n")
+                notify_progress('slot_still_open', f'空位仍在（告警后 {secs:.0f} 秒复验通过）：{key}，还来得及', repeat=False)
+                st['still_open_sent'] = True
+                st['count'] = len(items)
+                state[key] = st
+                save_state(state)
             elif not now_avail and was_avail:
                 log(f'  {key}: 刚才的空位已被占，状态复位')
                 state[key] = {'available': False, 'notified_ts': st.get('notified_ts', 0), 'count': 0}
