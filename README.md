@@ -84,11 +84,12 @@ SCAN_TARGETS="2026-10-21:13-22,2026-10-24:7-22" .venv/bin/python scan_notify.py 
 | `AUTO_SCHEDULE` | 0 | 置 1 时按课表生成目标 |
 | `REFRESH_SCHEDULE` | 1 | 课表超过 6 天时重抓 |
 | `CLASS_BUFFER_MIN` | 20 | 课程前后预留的通勤时间 |
+| `DEEP_SWEEP_MIN` | 30 | 每隔多少分钟做一轮全量排期核对 |
 | `GYM_OPEN_HOUR` / `GYM_CLOSE_HOUR` | 12 / 22 | 健身房开放窗口 |
 
-一次查询返回整天 15 个时段，扫全天与扫一小时调用量相同。会话是否可用以排期查询能否拿到 `dateId` 判定。命中需要连续 5 次复采仍为可约才提示，未通过的写入 `[slot_blink]`；提示时弹一个静默对话框，40 秒后仍有空位再补一个。告警落在本机对话框、`notifications.txt`、`notifications.json` 三处。需要在手机上接收的，把 Server酱 SendKey 或飞书、企业微信机器人 webhook 填进 `config.json` 的通知配置，或界面里对应的输入框。
+一次查询返回整天 15 个时段，扫全天与扫一小时调用量相同。会话是否可用以排期查询能否拿到 `dateId` 判定。命中需要连续 3 次复采仍为可约才提示，未通过的写入 `[slot_blink]`；提示时弹一个静默对话框，40 秒后仍有空位再补一个。告警落在本机对话框、`notifications.txt`、`notifications.json` 三处。需要在手机上接收的，把 Server酱 SendKey 或飞书、企业微信机器人 webhook 填进 `config.json` 的通知配置，或界面里对应的输入框。
 
-排期接口的调用量按日计限，撞上限时程序休眠到次日 00:10 继续。
+轮询分两层。粗筛调 `queryFieldReserveSituationIsFull`，一个请求返回全部约 8 个日期的 `dateId`、`isAll`（当天是否全满）和 `open`，`isAll=true` 的日期直接判定为空；核对轮调 `queryFieldSituation`，一天一次，拿到完整排期矩阵。两层各自计限，粗筛把单轮请求数从「日期数」压到 1，60 秒一轮也能覆盖全天所有目标日期。核对轮用于校准 `isAll`，一旦发现粗筛说满而排期有位，程序写入 `[flag_mismatch]` 并退回每轮全查。撞到 `每日请求超过限制` 时休眠到次日 00:10。
 
 ## 课表
 

@@ -45,6 +45,8 @@ REQUEST_SPACING_S = float(os.environ.get('REQUEST_SPACING_S', '1.2'))
 RENOTIFY_COOLDOWN_S = 600          # 同一时段持续有空时，最多 10 分钟提醒一次
 AUTH_NOTIFY_COOLDOWN_S = 1800      # 需要重新验证这类提醒半小时最多一次
 STALL_NOTIFY_S = 1800              # 连续 30 分钟拿不到真实数据 → 提醒“在空转”
+DEEP_SWEEP_MIN = float(os.environ.get('DEEP_SWEEP_MIN', '30'))   # 每 N 分钟一轮全量核对比对粗筛
+GATE = {'trust': True}             # 粗筛判据一旦被证伪就自动退回每轮全查
 
 _uk = os.environ.get('JACCOUNT_USERNAME', '')
 _pk = os.environ.get('JACCOUNT_PASSWORD', '')
@@ -265,8 +267,33 @@ def raw_situation(cookie: str, date_str: str, date_id: str, session=None):
         return [], f'{type(exc).__name__} {str(exc)[:60]}'
 
 
-def scan_once(cookie: str, targets, session):
-    """一轮只发 1 + 目标日期数 个请求：一次 dateId 映射 + 每个日期一次排期。
+def is_full_state(cookie: str, date_str: str, session=None):
+    """一次请求拿到全部约 8 个日期的 {dateId, isAll, open}。
+
+    queryFieldReserveSituationIsFull 每条记录自带 isAll（true=这天全满）和 open，而
+    queryFieldSituation 才是每天要打上千次才会撞到的那个配额。所以用它当粗筛：
+    isAll=true 的日期直接跳过排期请求，一轮只花 1 个请求就能覆盖所有日期。
+    返回 ({日期: {...}}, 服务端msg)。
+    """
+    vm = VENUE_MAP['stu_gym']
+    s = session or requests
+    try:
+        r = s.post(f"{API_BASE}/manage/fieldDetail/queryFieldReserveSituationIsFull",
+                   json={"date": date_str, "feildType": vm['venTypeId'], "id": vm['venueId']},
+                   headers=_headers(cookie), timeout=8)
+        j = r.json()
+        data = j.get('data') or []
+        out = {}
+        for x in data:
+            if x.get('date') and x.get('dateId'):
+                out[x['date']] = {'dateId': x['dateId'], 'isAll': x.get('isAll'), 'open': x.get('open')}
+        return out, str(j.get('msg') or '')
+    except Exception as exc:
+        return {}, f'{type(exc).__name__} {str(exc)[:60]}'
+
+
+def scan_once(cookie: str, targets, session, deep: bool = True):
+    """一轮请求数 = 1（粗筛）+ 需要看排期的日期数；deep=True 时每个日期都看排期。
 
     返回 (found, dead, all_empty, real_data, throttle_msg)。throttle_msg 非空说明这一轮是被
     限流挡住的，上层据此退避，而不是当成“会话失效”去登录（登录一次要发几十个请求）。
@@ -275,17 +302,22 @@ def scan_once(cookie: str, targets, session):
     found = {}
     statuses = []
     throttle = ''
+    flags = {}
     dates = sorted({d for d, _ in targets})
-    ids, msg = raw_date_ids(cookie, dates[0], session)
+    ids, msg = is_full_state(cookie, dates[0], session)
     if '每日请求超过限制' in msg or '请求过于频繁' in msg:
         return {}, False, True, False, msg
+    for d, v in ids.items():
+        flags[d] = v
+    skipped = 0
     by_date = {}
     for date_str, slot in targets:
         by_date.setdefault(date_str, []).append(slot)
     for date_str in sorted(by_date):
         slots = by_date[date_str]
         keys = [f'{date_str} {s}' for s in slots]
-        date_id = ids.get(date_str)
+        info = flags.get(date_str) or {}
+        date_id = info.get('dateId')
         if not date_id:
             ids2, msg2 = raw_date_ids(cookie, date_str, session)
             if '每日请求超过限制' in msg2 or '请求过于频繁' in msg2:
@@ -296,6 +328,15 @@ def scan_once(cookie: str, targets, session):
                 found[k] = []
             log(f'  - {date_str}: 空 (未取到 dateId，可能未放号或会话失效)')
             statuses.append('nodateid')
+            continue
+        # 粗筛：isAll 明确为 true 就认定这天满，省掉一次 queryFieldSituation。
+        # 判据只认 false —— 字段缺失/为 null 一律回退到查排期，宁可多打一个请求也别漏。
+        if not deep and GATE['trust'] and info.get('isAll') is True:
+            for k in keys:
+                found[k] = []
+            log(f'  - {keys[0]}: 空 (粗筛 isAll=true，未打排期接口)')
+            statuses.append('full')
+            skipped += 1
             continue
         # 一个日期只查一次排期，同一天的多个时段区间共用这份矩阵。
         # 请求之间留一点间隔：一轮 9 个请求在 1 秒内打完会撞上“请求过于频繁”的突发速率限制。
@@ -341,6 +382,9 @@ def scan_once(cookie: str, targets, session):
                 log(f'  + {key}: 有 {len(items)} 个 -> {seats}')
             else:
                 log(f'  - {key}: 空 (售罄)')
+        if day_hit and info.get('isAll') is True:
+            GATE['trust'] = False
+            log(f'  [flag_mismatch] {date_str} 粗筛 isAll=true 但排期里有位 —— 粗筛不可信，退回每轮全查')
         statuses.append('avail' if day_hit else 'full')
     dead = bool(statuses) and all(s == 'nodateid' for s in statuses)
     all_empty = bool(statuses) and all(s in ('noresult', 'nodateid') for s in statuses) and 'noresult' in statuses
@@ -496,7 +540,7 @@ def main():
     interval = max(15.0, args.interval)
     log('=== 扫描启动：只查不买 ===')
     log(('[按课表自动]' if auto else '[手动]') + '目标：' + ' | '.join(f'{d} {t}' for d, t in targets)
-        + f'；每 {interval:.0f}s 一轮')
+        + f'；每 {interval:.0f}s 一轮（粗筛 1 请求/轮，每 {DEEP_SWEEP_MIN:.0f} 分钟全量核对排期）')
 
     # 启动时没有可用会话就反复重试，绝不退出（2026-10-16 教训：原来失败即 return，结果白等一天）
     state = load_state()
@@ -547,12 +591,16 @@ def main():
                 targets = got
                 log('新的一天，按课表更新目标：' + ' | '.join(f'{d} {t}' for d, t in targets))
         round_no += 1
-        log(f'第 {round_no} 轮')
+        # 粗筛轮：1 个请求覆盖全部日期；每隔 DEEP_SWEEP_MIN 分钟插一轮全量排期核对，
+        # 既校准 isAll 判据，也保证就算粗筛字段不可信也不会连着几小时漏位。
+        deep_every = max(1, int(round(DEEP_SWEEP_MIN * 60 / interval)))
+        deep = GATE['trust'] is False or (round_no - 1) % deep_every == 0
+        log(f'第 {round_no} 轮' + ('（全量核对）' if deep and GATE['trust'] else ''))
         try:
             # 每轮轮换起点：短窗口限流只会打到一轮里排在后面的日期，固定顺序会让
             # 最后那一两个日期永远查不到
             rot = targets[round_no % len(targets):] + targets[:round_no % len(targets)]
-            results, dead, all_empty, real_data, throttle = scan_once(cookie, rot, session)
+            results, dead, all_empty, real_data, throttle = scan_once(cookie, rot, session, deep=deep)
         except AuthError as exc:
             log(f'认证失效：{str(exc)[:150]}')
             results, dead, all_empty, real_data, throttle = {}, True, False, False, ''
