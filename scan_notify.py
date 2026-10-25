@@ -104,7 +104,12 @@ def notify_progress(event_type: str, message: str, details=None, sound='Glass', 
         from messages import send_notifications
         cfg = APP.load_config().get('notifications', {})
         if any(cfg.get(k) for k in ('FANGTANG_KEY', 'FEISHU_WEBHOOK', 'WECOM_WEBHOOK')):
-            send_notifications(f'[{event_type}] {message[:40]}', message, cfg)
+            # 飞书自定义机器人普遍配了「自定义关键词」，标题必须带上「健身房」，
+            # 否则消息会被 "Key Words Not Found" 静默退回（2026-10-25 实测）。
+            res = send_notifications(f'健身房 [{event_type}] {message[:40]}', message, cfg)
+            bad = [f'{k}: {v[:70]}' for k, v in (res or {}).items() if 'success' not in str(v).lower()]
+            if bad:
+                log('webhook 被退回 —— ' + ' | '.join(bad))
     except Exception as exc:
         log(f'webhook notify failed: {exc}')
 
