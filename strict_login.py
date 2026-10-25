@@ -49,6 +49,9 @@ def build_options(headless: bool, anti_detect: bool):
     opts.add_argument(f'--user-data-dir={PROFILE}')
     opts.add_argument('--window-size=1280,900')
     opts.add_argument('--lang=zh-CN')
+    # 首页会拉外部 CDN，而这台机器直连外网不通（只有校园网可达），normal 策略要等所有子资源，
+    # 于是每次都 "Timed out receiving message from renderer"。eager 只要 DOM 建好就返回。
+    opts.page_load_strategy = 'eager'
     # 本机 DNS 解析不出学校域名时，显式走本地代理（由代理端解析）
     proxy = os.environ.get('CHROME_PROXY', '').strip()
     if proxy:

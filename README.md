@@ -10,6 +10,7 @@
 - 命令行 `main.py --mode login|check|book|watch|scan7|all`，其中 `check` 只查询。
 - `scan_notify.py`：对指定「日期 + 时段」组合持续轮询，命中后在本机告警，不下单。
 - `harvest_session.py`、`strict_login.py`、`login_with_2fa.py`：三种登录路径，分别是复用浏览器已有会话、自动登录、以及需要人工扫码的二次验证。
+- `login_assist.py`：打开浏览器后先探一次静默 SSO —— profile 里还留着 jAccount 的「信任此浏览器」时，访问站点就会重铸 `JSESSIONID`，不用扫码也不用认验证码；探不到才走填表流程，并把验证码图片落到 `/tmp/gym_captcha.png` 等 `/tmp/gym_cap_answer.txt` 回填。`manual_login.py` 是全交给手动：脚本只开浏览器和验会话。
 - `fetch_timetable.py`、`parse_timetable.py`、`gym_windows.py`：抓取并解析教务课表，生成每天的可扫时段。
 - `alert_helper.py`：本机对话框告警。
 - `browser_cleanup.py`：管理脚本自己启动的 Chrome 与 chromedriver 生命周期。
@@ -84,10 +85,11 @@ SCAN_TARGETS="2026-10-21:13-22,2026-10-24:7-22" .venv/bin/python scan_notify.py 
 | `AUTO_SCHEDULE` | 0 | 置 1 时按课表生成目标 |
 | `REFRESH_SCHEDULE` | 1 | 课表超过 6 天时重抓 |
 | `CLASS_BUFFER_MIN` | 20 | 课程前后预留的通勤时间 |
-| `DEEP_SWEEP_MIN` | 30 | 每隔多少分钟做一轮全量排期核对 |
+| `DEEP_SWEEP_MIN` | 30 | 每隔多少分钟做一轮全量排期核对，填 `0` 表示每轮都全查 |
+| `EXCLUDE_DATES` | 空 | 逗号分隔的日期，从按课表生成的目标里剔除（已经抢到的那天不用再扫） |
 | `GYM_OPEN_HOUR` / `GYM_CLOSE_HOUR` | 12 / 22 | 健身房开放窗口 |
 
-一次查询返回整天 15 个时段，扫全天与扫一小时调用量相同。会话是否可用以排期查询能否拿到 `dateId` 判定。命中需要连续 3 次复采仍为可约才提示，未通过的写入 `[slot_blink]`；提示时弹一个静默对话框，40 秒后仍有空位再补一个。告警落在本机对话框、`notifications.txt`、`notifications.json` 三处。需要在手机上接收的，把 Server酱 SendKey 或飞书、企业微信机器人 webhook 填进 `config.json` 的通知配置，或界面里对应的输入框。
+一次查询返回整天 15 个时段，扫全天与扫一小时调用量相同。会话是否可用以排期查询能否拿到 `dateId` 判定。命中需要连续 3 次复采仍为可约才提示，未通过的写入 `[slot_blink]`；提示时弹一个静默对话框，40 秒后仍有空位再补一个。告警落在本机对话框、`notifications.txt`、`notifications.json` 三处。需要在手机上接收的，把 Server酱 SendKey 或飞书、企业微信机器人 webhook 填进 `config.json` 的通知配置、界面里对应的输入框，或者用 `notify_store.py` 存进本机 `state/notify.json`（0600，不进版本库）；环境变量为空时 `load_config` 会自动读这个文件，重启扫描不用重新带一遍地址。配好之后 `python test_notify.py <webhook> [加签密钥]` 当场发一条验证，飞书自定义机器人的安全设置选「签名校验」就把密钥一起传，选「自定义关键词」就填「健身房」。
 
 轮询分两层。粗筛调 `queryFieldReserveSituationIsFull`，一个请求返回全部约 8 个日期的 `dateId`、`isAll`（当天是否全满）和 `open`，`isAll=true` 的日期直接判定为空；核对轮调 `queryFieldSituation`，一天一次，拿到完整排期矩阵。两层各自计限，粗筛把单轮请求数从「日期数」压到 1，60 秒一轮也能覆盖全天所有目标日期。核对轮用于校准 `isAll`，一旦发现粗筛说满而排期有位，程序写入 `[flag_mismatch]` 并退回每轮全查。撞到 `每日请求超过限制` 时休眠到次日 00:10。
 

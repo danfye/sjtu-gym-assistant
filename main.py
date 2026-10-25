@@ -34,6 +34,13 @@ def load_config():
     cfg['notifications']['FEISHU_WEBHOOK'] = subst(cfg['notifications'].get('FEISHU_WEBHOOK'))
     cfg['notifications']['FEISHU_SECRET'] = subst(cfg['notifications'].get('FEISHU_SECRET'))
     cfg['notifications']['WECOM_WEBHOOK'] = subst(cfg['notifications'].get('WECOM_WEBHOOK'))
+    # 没给环境变量时，退回读本机 state/notify.json（state/ 不进版本库），
+    # 免得每次重启扫描都要重新在命令行里带一遍 webhook。
+    try:
+        import notify_store
+        notify_store.apply_local_overrides(cfg['notifications'])
+    except Exception:
+        pass
     return cfg
 
 

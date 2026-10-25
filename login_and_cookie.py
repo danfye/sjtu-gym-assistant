@@ -52,6 +52,10 @@ def _apply_chromium_options(options, headless: bool, binary_path: str = None):
     options.add_argument('--disable-gpu')
     options.add_argument('--window-size=1280,900')
     options.add_argument('--lang=zh-CN')
+    # 站点首页会去拉外部 CDN（这台机器直连外网是不通的，只有校园网可达），
+    # 默认的 normal 策略要等所有子资源加载完，于是每次都卡在 "Timed out receiving message
+    # from renderer"。eager 只要 DOM 建好就返回，登录表单和同源验证码不受影响。
+    options.page_load_strategy = 'eager'
     # 可选：指定持久化 profile 目录，让 jAccount 的“信任此浏览器”在下次自动登录时仍然免二次验证
     user_data_dir = os.environ.get('CHROME_USER_DATA_DIR', '').strip()
     if user_data_dir and Path(user_data_dir).expanduser().is_dir():

@@ -461,6 +461,21 @@ def situation_probe_msg(cookie: str, date_str: str, session=None):
         return f'{type(exc).__name__} {str(exc)[:60]}', None
 
 
+def apply_excludes(got):
+    """按 EXCLUDE_DATES（逗号分隔，支持完整日期或 YYYY-MM-DD 前缀）剔掉已经抢到/不要的日期。
+
+    请求数跟日期数成正比，所以「这几天已经有了」这件事能直接换成别的日期的轮询频率。
+    """
+    raw = os.environ.get('EXCLUDE_DATES', '').strip()
+    if not raw or not got:
+        return got
+    bad = {x.strip() for x in raw.split(',') if x.strip()}
+    kept = [(d, t) for d, t in got if d not in bad]
+    if len(kept) != len(got):
+        log('[排除日期] 去掉 ' + ' '.join(sorted(bad)) + f'，剩 {len({d for d, _ in kept})} 个日期')
+    return kept or got
+
+
 def auto_targets():
     """按课表滚动生成目标（AUTO_SCHEDULE=1）。
 
@@ -534,7 +549,7 @@ def main():
     auto = os.environ.get('AUTO_SCHEDULE', '') == '1'
     cur_day = datetime.now().date()
     if auto:
-        got = parse_targets(auto_targets())
+        got = apply_excludes(parse_targets(auto_targets()))
         if got:
             targets = got
     interval = max(15.0, args.interval)
@@ -586,7 +601,7 @@ def main():
         wait_until_active()
         if auto and datetime.now().date() != cur_day:
             cur_day = datetime.now().date()
-            got = parse_targets(auto_targets())
+            got = apply_excludes(parse_targets(auto_targets()))
             if got:
                 targets = got
                 log('新的一天，按课表更新目标：' + ' | '.join(f'{d} {t}' for d, t in targets))
