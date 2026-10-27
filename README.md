@@ -89,9 +89,13 @@ SCAN_TARGETS="2026-10-21:13-22,2026-10-24:7-22" .venv/bin/python scan_notify.py 
 | `EXCLUDE_DATES` | 空 | 逗号分隔的日期，从按课表生成的目标里剔除（已经抢到的那天不用再扫） |
 | `GYM_OPEN_HOUR` / `GYM_CLOSE_HOUR` | 12 / 22 | 健身房开放窗口 |
 
-一次查询返回整天 15 个时段，扫全天与扫一小时调用量相同。会话是否可用以排期查询能否拿到 `dateId` 判定。命中需要连续 3 次复采仍为可约才提示，未通过的写入 `[slot_blink]`；提示时弹一个静默对话框，40 秒后仍有空位再补一个。告警落在本机对话框、`notifications.txt`、`notifications.json` 三处。需要在手机上接收的，把 Server酱 SendKey 或飞书、企业微信机器人 webhook 填进 `config.json` 的通知配置、界面里对应的输入框，或者用 `notify_store.py` 存进本机 `state/notify.json`（0600，不进版本库）；环境变量为空时 `load_config` 会自动读这个文件，重启扫描不用重新带一遍地址。配好之后 `python test_notify.py <webhook> [加签密钥]` 当场发一条验证，飞书自定义机器人的安全设置选「签名校验」就把密钥一起传，选「自定义关键词」就填「健身房」——推送标题固定带这两个字，否则机器人会按关键词把消息退回 `Key Words Not Found`，而扫描器会把退回原因写进 `scan.log`。
+一次查询返回整天 15 个时段，扫全天与扫一小时调用量相同。会话是否可用以排期查询能否拿到 `dateId` 判定。命中后复采，累计 `CONFIRM_NEED`（默认 2）次可约就提示；只有一次都没采到可约才判成抖动写入 `[slot_blink]`，采到过可约但没够次数也照样提示。提示时弹一个静默对话框，40 秒后仍有空位再补一个。告警落在本机对话框、`notifications.txt`、`notifications.json` 三处。需要在手机上接收的，把 Server酱 SendKey 或飞书、企业微信机器人 webhook 填进 `config.json` 的通知配置、界面里对应的输入框，或者用 `notify_store.py` 存进本机 `state/notify.json`（0600，不进版本库）；环境变量为空时 `load_config` 会自动读这个文件，重启扫描不用重新带一遍地址。配好之后 `python test_notify.py <webhook> [加签密钥]` 当场发一条验证，飞书自定义机器人的安全设置选「签名校验」就把密钥一起传，选「自定义关键词」就填「健身房」——推送标题固定带这两个字，否则机器人会按关键词把消息退回 `Key Words Not Found`，而扫描器会把退回原因写进 `scan.log`。
 
 轮询分两层。粗筛调 `queryFieldReserveSituationIsFull`，一个请求返回全部约 8 个日期的 `dateId`、`isAll`（当天是否全满）和 `open`，`isAll=true` 的日期直接判定为空；核对轮调 `queryFieldSituation`，一天一次，拿到完整排期矩阵。两层各自计限，粗筛把单轮请求数从「日期数」压到 1，60 秒一轮也能覆盖全天所有目标日期。核对轮用于校准 `isAll`，一旦发现粗筛说满而排期有位，程序写入 `[flag_mismatch]` 并退回每轮全查。撞到 `每日请求超过限制` 时休眠到次日 00:10。
+
+`isfull_watch.py` 是备用通道：`queryFieldSituation` 被限额锁住时，用限额独立的 `queryFieldReserveSituationIsFull` 盯 `isAll` 翻转，'
+    '翻 false 就弹框并推飞书（`[gate_available]`，给不出具体钟点，需要人去页面确认）。长期进程一律用 `run_detached.py` 起，'
+    '它把任务放进独立会话（`start_new_session`）并挂 `caffeinate`，不会随启动它的 shell 一起被收掉。
 
 ## 课表
 

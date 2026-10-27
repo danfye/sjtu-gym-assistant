@@ -211,10 +211,14 @@ def sample_slot(cookie: str, date_str: str, hour: int, session=None):
     return ('open' if str(cell.get('status')) == '0' else 'closed'), desc
 
 
-def probe_streak(cookie: str, date_str: str, hour: int, need: int = 3, gap: float = 4.0):
+CONFIRM_NEED = int(os.environ.get('CONFIRM_NEED', '2'))   # 复采几次可约就喊人，2026-10-27 从 3 降到 2
+
+
+def probe_streak(cookie: str, date_str: str, hour: int, need: int = CONFIRM_NEED, gap: float = 4.0):
     """命中后再采几枪，把结果分成三档。
 
-    confirmed：累计采到 need 次可约（中间允许夹着售罄/限流），可以直接喊人。
+    confirmed：累计采到 need 次可约（中间允许夹着售罄/限流），可以直接喊人。need 由
+    CONFIRM_NEED 控制，默认 2 —— 3 次太苛，实测十几秒的窗口基本必漏（2026-10-27）。
     seen：采到过可约，但没采够连续确认（多为站点限流占用了采样窗口）—— 仍然要喊，
            漏报的代价远高于多弹一次。
     blink：至少 2 次成功采到并且都不是可约，判为空位一闪即灭，不喊。
@@ -801,7 +805,7 @@ def main():
                     save_state(state)
                     continue
                 if level == 'confirmed':
-                    head = f'连续 {hits_n} 次确认可约：{key}'
+                    head = f'复采 {reads_n} 次、{hits_n} 次确认可约：{key}'
                 else:
                     head = f'采到空位但站点限流未采够确认（{hits_n} 次可约）：{key}'
                 notify_progress('slot_available', f'{head} —— {detail}，马上刷新页面下单', repeat=False)
