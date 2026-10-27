@@ -74,6 +74,39 @@ def macos_notify(title: str, body: str, sound: str = 'Glass'):
         log(f'macos_notify failed: {exc}')
 
 
+ERR_ALERT_TYPES = ('auth_required', 'error_occurred', 'crashed', 'stalled', 'quota_exhausted')
+ALERT_PUSH_CAP = int(os.environ.get('ALERT_PUSH_CAP', '3'))   # 同一类报错每天最多推这么多次
+PUSH_COUNT_FILE = BASE / 'notify_pushes.json'
+
+
+def alert_budget(event_type: str) -> bool:
+    """报错类告警的推送额度：同一类型每天最多 ALERT_PUSH_CAP 次，空位告警不受限制。
+
+    之前 auth_required 每轮重试都会再推一次，一个下午手机被刷了 11 条；这类问题不是
+    多发几条就能自己好的，多发只会让人把通知静音。超出后仍然写 scan.log / notifications.txt。
+    """
+    if event_type not in ERR_ALERT_TYPES:
+        return True
+    today = time.strftime('%Y-%m-%d')
+    try:
+        data = json.loads(PUSH_COUNT_FILE.read_text(encoding='utf-8')) if PUSH_COUNT_FILE.exists() else {}
+    except Exception:
+        data = {}
+    if str(data.get('date', '')) != today:
+        data = {'date': today, 'counts': {}}
+    counts = data.setdefault('counts', {})
+    used = int(counts.get(event_type, 0))
+    if used >= ALERT_PUSH_CAP:
+        log(f'[alert_capped] {event_type} 今日已推 {used} 次，达上限 {ALERT_PUSH_CAP}，不再推飞书/弹框（仍写日志）')
+        return False
+    counts[event_type] = used + 1
+    try:
+        PUSH_COUNT_FILE.write_text(json.dumps(data, ensure_ascii=False), encoding='utf-8')
+    except Exception:
+        pass
+    return True
+
+
 def notify_progress(event_type: str, message: str, details=None, sound='Glass', repeat: bool = True):
     """写 notifications.json/.txt + 系统通知；只在真正重要的事件上调用，避免刷屏。"""
     rec = {
@@ -91,8 +124,10 @@ def notify_progress(event_type: str, message: str, details=None, sound='Glass', 
     with open(NOTIF_TXT, 'a', encoding='utf-8') as f:
         f.write(f"{rec['time']} [{event_type}] {message}\n")
     log(f"NOTIFICATION [{event_type}] {message}")
-    macos_notify('健身房空位扫描', message, sound)
-    if event_type in ('slot_available', 'slot_still_open', 'auth_required', 'error_occurred'):
+    allowed = alert_budget(event_type)      # 报错类超出额度后只留日志
+    if allowed:
+        macos_notify('健身房空位扫描', message, sound)
+    if allowed and event_type in ('slot_available', 'slot_still_open', 'auth_required', 'error_occurred'):
         # 静默对话框；空位命中只弹一次（25 秒自动消失），会话失效这类才持续提醒
         total, gap = ('300', '45') if repeat else ('25', '3600')
         try:
@@ -104,7 +139,7 @@ def notify_progress(event_type: str, message: str, details=None, sound='Glass', 
     try:                                    # config.json 里填了 webhook 就一并推送
         from messages import send_notifications
         cfg = APP.load_config().get('notifications', {})
-        if any(cfg.get(k) for k in ('FANGTANG_KEY', 'FEISHU_WEBHOOK', 'WECOM_WEBHOOK')):
+        if allowed and any(cfg.get(k) for k in ('FANGTANG_KEY', 'FEISHU_WEBHOOK', 'WECOM_WEBHOOK')):
             # 飞书自定义机器人普遍配了「自定义关键词」，标题必须带上「健身房」，
             # 否则消息会被 "Key Words Not Found" 静默退回（2026-10-25 实测）。
             res = send_notifications(f'健身房 [{event_type}] {message[:40]}', message, cfg)
@@ -432,6 +467,23 @@ def refresh_cookie(reason: str):
     if not (_uk and _pk):
         log('环境变量里没有 JACCOUNT_USERNAME/JACCOUNT_PASSWORD，无法走完整登录')
         return None
+    # 先走 login_assist：它自己判断该直连还是走代理，并优先用 profile 里 jAccount 的
+    # 「信任此浏览器」静默 SSO。2026-10-27 下午 harvest 与 strict_login 双双报 Bad Gateway 时，
+    # 这条路一次就过。
+    before = load_cookie()[1]
+    probe_date = time.strftime('%Y-%m-%d', time.localtime(time.time() + 86400))
+    try:
+        subprocess.run([sys.executable, '-u', str(BASE / 'login_assist.py')], cwd=str(BASE),
+                       stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT, timeout=420)
+    except Exception as exc:
+        log(f'login_assist 子进程异常：{type(exc).__name__} {str(exc)[:80]}')
+    new, saved_at = load_cookie()
+    if new and saved_at != before:
+        ids, _m = is_full_state(new, probe_date)
+        if ids:
+            log(f'login_assist 取到新会话（{len(ids)} 个日期可查）')
+            return new
+        log('login_assist 写了 cookie 但接口不认，继续试 strict_login')
     try:
         import strict_login
         ok = strict_login.try_login(False, True, '自动重登（有窗口+反指纹）')

@@ -16,6 +16,8 @@ import sys
 import time
 from pathlib import Path
 
+import requests
+
 base = Path(__file__).resolve().parent
 sys.path.insert(0, str(base))
 
@@ -104,7 +106,22 @@ opts.page_load_strategy = os.environ.get('PAGE_LOAD_STRATEGY', 'eager')
 opts.add_experimental_option('excludeSwitches', ['enable-automation'])
 opts.add_experimental_option('useAutomationExtension', False)
 opts.add_argument('--disable-blink-features=AutomationControlled')
-_px = os.environ.get('CHROME_PROXY', '').strip()
+def pick_proxy_mode():
+    """校园网直连可用时让 Chrome 走直连：本机代理（Clash）抖一下就会把整轮登录变成
+    WebDriverException Bad Gateway / 白屏，而 sports 和 jAccount 都是校园内网可达。
+    2026-10-27 17:51 那次「一小时内 3 次拿不到会话」就是这么来的。"""
+    try:
+        st = requests.Session()
+        st.trust_env = False
+        code = st.get('https://sports.sjtu.edu.cn/', timeout=8, allow_redirects=False).status_code
+        if code in (200, 301, 302, 400, 401, 403):
+            return 'direct://'
+    except Exception:
+        pass
+    return ''
+
+
+_px = os.environ.get('CHROME_PROXY', '').strip() or pick_proxy_mode()
 _hr = os.environ.get('CHROME_HOST_RESOLVER', '').strip()
 if _px:
     opts.add_argument(f'--proxy-server={_px}')
