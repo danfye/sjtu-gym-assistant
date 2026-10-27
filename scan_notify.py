@@ -47,6 +47,7 @@ AUTH_NOTIFY_COOLDOWN_S = 1800      # 需要重新验证这类提醒半小时最�
 STALL_NOTIFY_S = 1800              # 连续 30 分钟拿不到真实数据 → 提醒“在空转”
 DEEP_SWEEP_MIN = float(os.environ.get('DEEP_SWEEP_MIN', '30'))   # 每 N 分钟一轮全量核对比对粗筛
 GATE = {'trust': True}             # 粗筛判据一旦被证伪就自动退回每轮全查
+QUOTA_RETRY_S = float(os.environ.get('QUOTA_RETRY_S', '900'))   # 额度按滚动窗口恢复，别一睡到次日
 
 _uk = os.environ.get('JACCOUNT_USERNAME', '')
 _pk = os.environ.get('JACCOUNT_PASSWORD', '')
@@ -213,7 +214,7 @@ def sample_slot(cookie: str, date_str: str, hour: int, session=None):
 def probe_streak(cookie: str, date_str: str, hour: int, need: int = 3, gap: float = 4.0):
     """命中后再采几枪，把结果分成三档。
 
-    confirmed：need 次成功采到且全为可约，可以直接喊人。
+    confirmed：累计采到 need 次可约（中间允许夹着售罄/限流），可以直接喊人。
     seen：采到过可约，但没采够连续确认（多为站点限流占用了采样窗口）—— 仍然要喊，
            漏报的代价远高于多弹一次。
     blink：至少 2 次成功采到并且都不是可约，判为空位一闪即灭，不喊。
@@ -234,7 +235,9 @@ def probe_streak(cookie: str, date_str: str, hour: int, need: int = 3, gap: floa
             ok += 1
         if opens >= need:
             return 'confirmed', ok, opens, last
-        if closes >= 2:
+        if closes >= 2 and opens == 0:      # 一次可约都没采到才判抖动
+            # 以前这里不看 opens，2 次可约 + 2 次售罄会被判成 blink 压掉：
+            # 2026-10-27 11:59 的 10-27 14:00-15:00 就是这么漏的（真实空位，当天下午能练）。
             return 'blink', ok, opens, last
         time.sleep(gap if outcome != 'unknown' else gap / 2)
     level = 'seen' if opens else 'blink'
@@ -636,14 +639,16 @@ def main():
             if nxt <= datetime.now():
                 nxt += timedelta(days=1)
             wait_s = (nxt - datetime.now()).total_seconds()
-            log(f'今日配额已用尽（{throttle}），休眠 {wait_s/3600:.1f} 小时到 {nxt:%m-%d %H:%M}')
+            nap_s = min(wait_s, QUOTA_RETRY_S)
+            log(f'配额已满（{throttle}），原计划睡到 {nxt:%m-%d %H:%M}，改为 {nap_s/60:.0f} 分钟后重探'
+                '（限额更像滚动窗口，午夜不一定清账）')
             if time.time() - state.get('_quota_notify_ts', 0) > AUTH_NOTIFY_COOLDOWN_S:
                 notify_progress('quota_exhausted',
                                 f'今日请求配额已用尽，扫描休眠到 {nxt:%m-%d %H:%M}（约 {wait_s/3600:.1f} 小时后恢复）',
                                 repeat=False)
                 state['_quota_notify_ts'] = time.time()
                 save_state(state)
-            time.sleep(max(60.0, wait_s))
+            time.sleep(max(60.0, nap_s))
             continue
 
         if throttle and not real_data:
@@ -680,11 +685,12 @@ def main():
                 if nxt <= datetime.now():
                     nxt = nxt + timedelta(days=1)
                 wait_s = (nxt - datetime.now()).total_seconds()
-                log(f'今日请求配额已用尽（{why}），休眠 {wait_s/3600:.1f} 小时至 {nxt:%m-%d %H:%M}')
+                wait_s = min(wait_s, QUOTA_RETRY_S)
+                log(f'请求配额已满（{why}），{wait_s/60:.0f} 分钟后重探（限额按滚动窗口，午夜不一定清账）')
                 last_q = state.get('_quota_notify_ts', 0)
                 if time.time() - last_q > AUTH_NOTIFY_COOLDOWN_S:
                     notify_progress('quota_exhausted',
-                                    f'学校接口今日请求配额用尽，扫描休眠到 {nxt:%m-%d %H:%M}（约 {wait_s/3600:.1f} 小时后）',
+                                    f'学校接口请求配额用尽，扫描每 {wait_s/60:.0f} 分钟重探一次，恢复即继续',
                                     repeat=False)
                     state['_quota_notify_ts'] = time.time()
                     save_state(state)

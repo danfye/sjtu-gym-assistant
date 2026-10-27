@@ -183,7 +183,9 @@ for attempt in range(1, MAX_ATTEMPTS + 1):
         except Exception:
             pass
         if '二次验证' in body or '完成验证' in body:
-            write_state('WAIT_2FA')
+            # 这两个词 jAccount 在图形验证码页也可能出现，所以把现场写清楚：
+            # 到底是二次验证，还是只需要人手工认一次验证码。
+            write_state(f'WAIT_HUMAN 需要你在 Chrome 窗口里操作一次 | url={drv.current_url[:90]} | 页面: {body[:120]}')
             deadline = time.time() + int(os.environ.get('WAIT_2FA_SECONDS', '900'))
             while time.time() < deadline:
                 time.sleep(3)
