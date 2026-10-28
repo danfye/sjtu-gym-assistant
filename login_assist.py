@@ -128,6 +128,17 @@ if _px:
 if _hr:
     opts.add_argument(f'--host-resolver-rules={_hr}')
 
+# 同一时刻只允许一个登录尝试：扫描器和粗筛哨兵都可能自己发起重登，两个 Chrome 抢同一个
+# chrome-profile 时表现为 SessionNotCreated 或 Bad Gateway，于是双双失败（2026-10-28 17:18-17:28
+# 那次会话续不上就是这么来的）。锁 10 分钟后自动失效，防止崩溃留下死锁。
+LOCK = Path('/tmp/gym_login.lock')
+if LOCK.exists() and time.time() - LOCK.stat().st_mtime < 600:
+    write_state(f'另一个登录尝试正在进行（锁 {int((time.time() - LOCK.stat().st_mtime) / 60)} 分钟前），本次退出')
+    sys.exit(0)
+LOCK.write_text(str(os.getpid()))
+import atexit
+atexit.register(lambda: LOCK.unlink(missing_ok=True))
+
 CAP_ANS.unlink(missing_ok=True)
 drv = BC.register(webdriver.Chrome(options=opts))
 BC.install_handlers(include_atexit=False)
