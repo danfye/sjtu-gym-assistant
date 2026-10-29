@@ -139,6 +139,17 @@ LOCK.write_text(str(os.getpid()))
 import atexit
 atexit.register(lambda: LOCK.unlink(missing_ok=True))
 
+# 起浏览器前先把自己人留下的 Chrome/driver 收干净：上一轮登录失败会留下占着 chrome-profile 的
+# 孤儿进程，下一次尝试就表现为 Bad Gateway / SessionNotCreated，越试越死（2026-10-29 14:21 那次
+# 哨兵自动重登失败就是卡在这)。sweep_stale 按项目目录归属过滤，不会动你自己开的 Chrome。
+try:
+    BC.sweep_stale()
+except Exception as exc:
+    print(f'清扫遗留浏览器失败：{type(exc).__name__}', flush=True)
+PROFILE.join('SingletonLock').unlink(missing_ok=True)
+PROFILE.join('SingletonSocket').unlink(missing_ok=True)
+time.sleep(2)
+
 CAP_ANS.unlink(missing_ok=True)
 drv = BC.register(webdriver.Chrome(options=opts))
 BC.install_handlers(include_atexit=False)
