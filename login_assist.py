@@ -146,8 +146,8 @@ try:
     BC.sweep_stale()
 except Exception as exc:
     print(f'清扫遗留浏览器失败：{type(exc).__name__}', flush=True)
-PROFILE.join('SingletonLock').unlink(missing_ok=True)
-PROFILE.join('SingletonSocket').unlink(missing_ok=True)
+(PROFILE / 'SingletonLock').unlink(missing_ok=True)
+(PROFILE / 'SingletonSocket').unlink(missing_ok=True)
 time.sleep(2)
 
 CAP_ANS.unlink(missing_ok=True)
