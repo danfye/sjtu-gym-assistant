@@ -570,6 +570,30 @@ def auto_targets():
         return ''
 
 
+def wait_for_quota(cookie: str, targets, state, max_hours: float = 14.0) -> bool:
+    """限额是按滚动窗口回收的，恢复期间每 QUOTA_RETRY_S 只发 1 次探测。
+
+    原来睡完就直接跑整轮全量核对（八个日期 = 8 个请求），等于自己又把窗口填满，
+    于是锁一直解不开：2026-10-30 00:30 到 13:18 之间重探 20 次，一次都没成功，
+    每次都是「8 个请求全被拒 → 睡 20 分钟 → 再来 8 个」。改成单发探测后，
+    恢复等待本身几乎不消耗额度，窗口才能真正排空。
+    """
+    step = max(60.0, QUOTA_RETRY_S)
+    deadline = time.time() + max_hours * 3600
+    while time.time() < deadline:
+        time.sleep(step)
+        msg, _d = situation_probe_msg(cookie, targets[0][0])
+        if '每日请求超过限制' in msg:
+            log(f'仍在限额内（本轮只探测 1 次），{step/60:.0f} 分钟后再探')
+            continue
+        log('限额已释放，恢复全量轮询')
+        state['_last_ok_ts'] = time.time()
+        save_state(state)
+        return True
+    log('等待限额释放超过 14 小时，回主循环继续尝试')
+    return False
+
+
 def wait_until_active():
     """只在活跃时段（默认 07:00-23:00）发请求，避免凌晨白白消耗每日配额。
 
@@ -704,7 +728,7 @@ def main():
                                 repeat=False)
                 state['_quota_notify_ts'] = time.time()
                 save_state(state)
-            time.sleep(max(60.0, nap_s))
+            wait_for_quota(cookie, targets, state)
             continue
 
         if throttle and not real_data:
