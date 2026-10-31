@@ -87,6 +87,7 @@ SCAN_TARGETS="2026-10-21:13-22,2026-10-24:7-22" .venv/bin/python scan_notify.py 
 | `CLASS_BUFFER_MIN` | 20 | 课程前后预留的通勤时间 |
 | `DEEP_SWEEP_MIN` | 30 | 每隔多少分钟做一轮全量排期核对，填 `0` 表示每轮都全查 |
 | `EXCLUDE_DATES` | 空 | 逗号分隔的日期，从按课表生成的目标里剔除（已经抢到的那天不用再扫） |
+| `EXCLUDE_WEEKDAYS` | 空 | `1`-`7`（周一到周日）逗号分隔，整天数类别排除，滚动生成时自动跳过 |
 | `GYM_OPEN_HOUR` / `GYM_CLOSE_HOUR` | 12 / 22 | 健身房开放窗口 |
 
 一次查询返回整天 15 个时段，扫全天与扫一小时调用量相同。会话是否可用以排期查询能否拿到 `dateId` 判定。命中后复采，累计 `CONFIRM_NEED`（默认 2）次可约就提示；只有一次都没采到可约才判成抖动写入 `[slot_blink]`，采到过可约但没够次数也照样提示。提示时弹一个静默对话框，40 秒后仍有空位再补一个。告警落在本机对话框、`notifications.txt`、`notifications.json` 三处。需要在手机上接收的，把 Server酱 SendKey 或飞书、企业微信机器人 webhook 填进 `config.json` 的通知配置、界面里对应的输入框，或者用 `notify_store.py` 存进本机 `state/notify.json`（0600，不进版本库）；环境变量为空时 `load_config` 会自动读这个文件，重启扫描不用重新带一遍地址。配好之后 `python test_notify.py <webhook> [加签密钥]` 当场发一条验证，飞书自定义机器人的安全设置选「签名校验」就把密钥一起传，选「自定义关键词」就填「健身房」——推送标题固定带这两个字，否则机器人会按关键词把消息退回 `Key Words Not Found`，而扫描器会把退回原因写进 `scan.log`。

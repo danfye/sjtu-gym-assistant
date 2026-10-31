@@ -11,6 +11,7 @@ Server酱/飞书/企微 webhook 就同时推送。
 """
 import argparse
 import json
+import re
 import os
 import subprocess
 import sys
@@ -530,6 +531,14 @@ def apply_excludes(got):
 
     请求数跟日期数成正比，所以「这几天已经有了」这件事能直接换成别的日期的轮询频率。
     """
+    # EXCLUDE_WEEKDAYS：按星期几整类排除（1=周一 … 7=周日），滚动生成目标时不会漏
+    wk = {int(x) for x in re.findall(r'\d', os.environ.get('EXCLUDE_WEEKDAYS', '')) if x != '0'}
+    if wk and got:
+        kept = [(d, t) for d, t in got if datetime.strptime(d, '%Y-%m-%d').isoweekday() not in wk]
+        if len(kept) != len(got):
+            log('[排除星期] 去掉 ' + '、'.join('一二三四五六日'[i - 1] for i in sorted(wk)) +
+                f'，剩 {len({d for d, _ in kept})} 个日期')
+        got = kept or got
     raw = os.environ.get('EXCLUDE_DATES', '').strip()
     if not raw or not got:
         return got
