@@ -539,10 +539,26 @@ def apply_excludes(got):
             log('[排除星期] 去掉 ' + '、'.join('一二三四五六日'[i - 1] for i in sorted(wk)) +
                 f'，剩 {len({d for d, _ in kept})} 个日期')
         got = kept or got
+    # 环境变量给的一次性排除项会写进 state/exclude_dates.json 累积保存：改范围、重启时
+    # 不必再手抄一遍历史排除（以前就漏过 11-01、11-04 这类）。RESET_EXCLUDES=1 可清空重来。
     raw = os.environ.get('EXCLUDE_DATES', '').strip()
-    if not raw or not got:
+    store = BASE / 'state' / 'exclude_dates.json'
+    saved = []
+    if store.exists():
+        try:
+            saved = [str(x) for x in json.loads(store.read_text(encoding='utf-8'))]
+        except Exception:
+            saved = []
+    merged = sorted(set(saved) | {x.strip() for x in raw.split(',') if x.strip()})
+    if merged != saved:
+        store.parent.mkdir(exist_ok=True)
+        store.write_text(json.dumps(merged, ensure_ascii=False), encoding='utf-8')
+        log('[排除清单] 已记住 ' + ' '.join(merged) + '（state/exclude_dates.json，不进版本库）')
+    if os.environ.get('RESET_EXCLUDES', '') == '1':
+        store.unlink(missing_ok=True)
+    if not merged or not got:
         return got
-    bad = {x.strip() for x in raw.split(',') if x.strip()}
+    bad = set(merged)
     kept = [(d, t) for d, t in got if d not in bad]
     if len(kept) != len(got):
         log('[排除日期] 去掉 ' + ' '.join(sorted(bad)) + f'，剩 {len({d for d, _ in kept})} 个日期')

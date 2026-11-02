@@ -86,7 +86,8 @@ SCAN_TARGETS="2026-10-21:13-22,2026-10-24:7-22" .venv/bin/python scan_notify.py 
 | `REFRESH_SCHEDULE` | 1 | 课表超过 6 天时重抓 |
 | `CLASS_BUFFER_MIN` | 20 | 课程前后预留的通勤时间 |
 | `DEEP_SWEEP_MIN` | 30 | 每隔多少分钟做一轮全量排期核对，填 `0` 表示每轮都全查 |
-| `EXCLUDE_DATES` | 空 | 逗号分隔的日期，从按课表生成的目标里剔除（已经抢到的那天不用再扫） |
+| `EXCLUDE_DATES` | 空 | 逗号分隔的日期，从按课表生成的目标里剔除（已经抢到的那天不用再扫）。给过的日期会累积写进 `state/exclude_dates.json`，重启不必重新手抄 |
+| `RESET_EXCLUDES` | 空 | 置 `1` 清空上面的排除清单，重新开始 |
 | `EXCLUDE_WEEKDAYS` | 空 | `1`-`7`（周一到周日）逗号分隔，整天数类别排除，滚动生成时自动跳过 |
 | `GYM_OPEN_HOUR` / `GYM_CLOSE_HOUR` | 12 / 22 | 健身房开放窗口 |
 
