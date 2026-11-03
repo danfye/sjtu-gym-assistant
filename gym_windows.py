@@ -16,7 +16,9 @@ SCHEDULE = Path(os.environ.get('SCHEDULE_JSON', str(BASE / 'schedule.json')))
 GYM_OPEN = int(os.environ.get('GYM_OPEN_HOUR', '12'))
 GYM_CLOSE = int(os.environ.get('GYM_CLOSE_HOUR', '22'))     # 可约格子到 21:00-22:00
 BUFFER_MIN = int(os.environ.get('CLASS_BUFFER_MIN', '20'))  # 课前课后各留多少分钟通勤/换衣
-HORIZON = int(os.environ.get('SCAN_HORIZON', '7'))          # 往后扫几天（含今天）
+# 往后扫几天（含今天）。接口一次返回 8 个日期 = 今天 + 7 天；默认值以前是 7，正好把
+# 「下周二」这类第 8 天的档漏在范围外（2026-11-03 实测 11-10 已经可查），所以跟着接口取 8。
+HORIZON = int(os.environ.get('SCAN_HORIZON', '8'))
 
 
 def _hm(s):
