@@ -361,9 +361,18 @@ def scan_once(cookie: str, targets, session, deep: bool = True):
     by_date = {}
     for date_str, slot in targets:
         by_date.setdefault(date_str, []).append(slot)
+    # 接口一次只放未来 8 天（今天+7）。目标窗口可能排到更后面，那种日子别再去追
+    # dateId —— 以前会为它多打一个请求然后报「未取到 dateId」，等于每轮白扔一次额度。
+    hi = max(flags) if flags else ''
     for date_str in sorted(by_date):
         slots = by_date[date_str]
         keys = [f'{date_str} {s}' for s in slots]
+        if hi and date_str > hi:
+            for k in keys:
+                found[k] = []
+            log(f'  - {date_str}: 尚未放号（接口最晚只到 {hi}），跳过且不额外发请求')
+            statuses.append('unpublished')
+            continue
         info = flags.get(date_str) or {}
         date_id = info.get('dateId')
         if not date_id:
