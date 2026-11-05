@@ -541,7 +541,22 @@ def apply_excludes(got):
     请求数跟日期数成正比，所以「这几天已经有了」这件事能直接换成别的日期的轮询频率。
     """
     # EXCLUDE_WEEKDAYS：按星期几整类排除（1=周一 … 7=周日），滚动生成目标时不会漏
-    wk = {int(x) for x in re.findall(r'\d', os.environ.get('EXCLUDE_WEEKDAYS', '')) if x != '0'}
+    wk_file = BASE / 'state' / 'exclude_weekdays.json'
+    wk_saved = set()
+    if wk_file.exists():
+        try:
+            wk_saved = {int(x) for x in json.loads(wk_file.read_text(encoding='utf-8'))}
+        except Exception:
+            wk_saved = set()
+    # 和排除日期一样累积记住：「周六周日没空」这类是长期偏好，不该每次重启都靠我手抄 env
+    wk = wk_saved | {int(x) for x in re.findall(r'\d', os.environ.get('EXCLUDE_WEEKDAYS', '')) if x not in ('0', '')}
+    if wk != wk_saved:
+        wk_file.parent.mkdir(exist_ok=True)
+        wk_file.write_text(json.dumps(sorted(wk), ensure_ascii=False), encoding='utf-8')
+        log('[排除星期] 已记住周' + '、周'.join('一二三四五六日'[i - 1] for i in sorted(wk))
+            + '（state/exclude_weekdays.json，不进版本库）')
+    if os.environ.get('RESET_EXCLUDES', '') == '1':
+        wk_file.unlink(missing_ok=True)
     if wk and got:
         kept = [(d, t) for d, t in got if datetime.strptime(d, '%Y-%m-%d').isoweekday() not in wk]
         if len(kept) != len(got):
