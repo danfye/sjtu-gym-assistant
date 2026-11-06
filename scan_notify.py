@@ -535,6 +535,20 @@ def situation_probe_msg(cookie: str, date_str: str, session=None):
         return f'{type(exc).__name__} {str(exc)[:60]}', None
 
 
+BUDGET_RPH = float(os.environ.get('BUDGET_RPH', '90'))   # 每小时愿意花在排期查询上的请求数
+
+
+def budget_interval(targets, floor_s: float = 60.0, ceil_s: float = 900.0):
+    """按「日期数 × 轮次 = 请求数」反推间隔：--interval 0（或负数）时启用。
+
+    日期数每天随 8 天窗口往后滚，手工定间隔不是超额度就是白白放慢；这里固定每小时
+    BUDGET_RPH 个请求，间隔 = 3600 × 日期数 / 预算，实测日额度约 1200 次、活跃 13 小时，
+    取 90/小时正好贴着上限。
+    """
+    n = len({d for d, _ in targets}) or 1
+    return max(floor_s, min(ceil_s, 3600.0 * n / BUDGET_RPH))
+
+
 def apply_excludes(got):
     """按 EXCLUDE_DATES（逗号分隔，支持完整日期或 YYYY-MM-DD 前缀）剔掉已经抢到/不要的日期。
 
@@ -689,7 +703,7 @@ def main():
         got = apply_excludes(parse_targets(auto_targets()))
         if got:
             targets = got
-    interval = max(15.0, args.interval)
+    interval = budget_interval(targets) if args.interval <= 0 else max(15.0, args.interval)
     log('=== 扫描启动：只查不买 ===')
     log(('[按课表自动]' if auto else '[手动]') + '目标：' + ' | '.join(f'{d} {t}' for d, t in targets)
         + f'；每 {interval:.0f}s 一轮（粗筛 1 请求/轮，每 {DEEP_SWEEP_MIN:.0f} 分钟全量核对排期）')
@@ -741,7 +755,12 @@ def main():
             got = apply_excludes(parse_targets(auto_targets()))
             if got:
                 targets = got
-                log('新的一天，按课表更新目标：' + ' | '.join(f'{d} {t}' for d, t in targets))
+                if args.interval <= 0:
+                    old_i, interval = interval, budget_interval(targets)
+                    log(f'新的一天，按课表更新目标：' + ' | '.join(f'{d} {t}' for d, t in targets)
+                        + f'；间隔随之 {old_i:.0f}s -> {interval:.0f}s（{len({d for d, _ in targets})} 个日期 ÷ {BUDGET_RPH:.0f} 请求/小时）')
+                else:
+                    log('新的一天，按课表更新目标：' + ' | '.join(f'{d} {t}' for d, t in targets))
         round_no += 1
         # 粗筛轮：1 个请求覆盖全部日期；每隔 DEEP_SWEEP_MIN 分钟插一轮全量排期核对，
         # 既校准 isAll 判据，也保证就算粗筛字段不可信也不会连着几小时漏位。
