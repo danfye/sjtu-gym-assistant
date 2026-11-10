@@ -49,6 +49,10 @@ STALL_NOTIFY_S = 1800              # 连续 30 分钟拿不到真实数据 → �
 DEEP_SWEEP_MIN = float(os.environ.get('DEEP_SWEEP_MIN', '30'))   # 每 N 分钟一轮全量核对比对粗筛
 GATE = {'trust': True}             # 粗筛判据一旦被证伪就自动退回每轮全查
 QUOTA_RETRY_S = float(os.environ.get('QUOTA_RETRY_S', '900'))   # 额度按滚动窗口恢复，别一睡到次日
+# 自动重登三段各自的墙钟预算：宁可这一轮拿不到会话，也不能让主循环卡在 Selenium 里出不来
+HARVEST_BUDGET_S = float(os.environ.get('HARVEST_BUDGET_S', '150'))
+LOGIN_BUDGET_S = float(os.environ.get('LOGIN_BUDGET_S', '420'))
+STRICT_BUDGET_S = float(os.environ.get('STRICT_BUDGET_S', '420'))
 
 _uk = os.environ.get('JACCOUNT_USERNAME', '')
 _pk = os.environ.get('JACCOUNT_PASSWORD', '')
@@ -466,44 +470,43 @@ def refresh_cookie(reason: str):
     (BASE / 'chrome-profile' / 'SingletonLock').unlink(missing_ok=True)
     # 快速路径：profile 里往往已经是登录状态，直接取会话。2026-10-17 的连败就是卡在这里 ——
     # 已登录时点“校内人员登录”不会跳 jAccount，strict_login 苦等跳转必然超时。
-    try:
-        from harvest_session import harvest_existing
-        ck = harvest_existing()
-        if ck:
-            log('复用浏览器现有会话成功，无需重新登录')
-            return ck
-    except Exception as exc:
-        log(f'取现有会话失败：{type(exc).__name__} {str(exc)[:150]}')
+    # 三条取会话的路子全部丢进子进程并各带一道硬预算。2026-11-10 上午的教训：进程内的
+    # harvest_existing 撞上 Selenium 卡死，一次重登吃掉 89 分钟且中途一行日志都没有，
+    # 那段时间扫描完全是瞎的。子进程超时要杀就杀，主循环继续往下走。
+    before = load_cookie()[1]
+    probe_date = time.strftime('%Y-%m-%d', time.localtime(time.time() + 86400))
+    t0 = time.time()
+
+    def _relogin_via(script: str, budget: float, label: str):
+        try:
+            subprocess.run([sys.executable, '-u', str(BASE / script)], cwd=str(BASE),
+                           stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT, timeout=budget)
+        except Exception as exc:
+            log(f'{label} 子进程异常/超时：{type(exc).__name__} {str(exc)[:80]}')
+        new, saved_at = load_cookie()
+        if not new or saved_at == before:
+            log(f'{label} 没写新 cookie（累计 {time.time() - t0:.0f}s）')
+            return None
+        ids, msg = is_full_state(new, probe_date)
+        if ids:
+            log(f'{label} 取到新会话（{len(ids)} 个日期可查，累计 {time.time() - t0:.0f}s）')
+            return new
+        log(f'{label} 写了 cookie 但接口不认：{str(msg)[:60]}')
+        return None
+
+    ck = _relogin_via('harvest_session.py', HARVEST_BUDGET_S, '复用浏览器现有会话')
+    if ck:
+        return ck
     if not (_uk and _pk):
         log('环境变量里没有 JACCOUNT_USERNAME/JACCOUNT_PASSWORD，无法走完整登录')
         return None
     # 先走 login_assist：它自己判断该直连还是走代理，并优先用 profile 里 jAccount 的
     # 「信任此浏览器」静默 SSO。2026-10-27 下午 harvest 与 strict_login 双双报 Bad Gateway 时，
     # 这条路一次就过。
-    before = load_cookie()[1]
-    probe_date = time.strftime('%Y-%m-%d', time.localtime(time.time() + 86400))
-    try:
-        subprocess.run([sys.executable, '-u', str(BASE / 'login_assist.py')], cwd=str(BASE),
-                       stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT, timeout=420)
-    except Exception as exc:
-        log(f'login_assist 子进程异常：{type(exc).__name__} {str(exc)[:80]}')
-    new, saved_at = load_cookie()
-    if new and saved_at != before:
-        ids, _m = is_full_state(new, probe_date)
-        if ids:
-            log(f'login_assist 取到新会话（{len(ids)} 个日期可查）')
-            return new
-        log('login_assist 写了 cookie 但接口不认，继续试 strict_login')
-    try:
-        import strict_login
-        ok = strict_login.try_login(False, True, '自动重登（有窗口+反指纹）')
-        if not ok:
-            return None
-        new, _ = load_cookie()
-        return new
-    except Exception as exc:
-        log(f'自动重登失败：{type(exc).__name__} {str(exc)[:200]}')
-        return None
+    ck = _relogin_via('login_assist.py', LOGIN_BUDGET_S, 'login_assist')
+    if ck:
+        return ck
+    return _relogin_via('strict_login.py', STRICT_BUDGET_S, 'strict_login')
 
 
 def situation_probe_msg(cookie: str, date_str: str, session=None):

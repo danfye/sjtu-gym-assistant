@@ -78,7 +78,10 @@ SCAN_TARGETS="2026-10-21:13-22,2026-10-24:7-22" .venv/bin/python scan_notify.py 
 
 | 环境变量 | 默认 | 作用 |
 | --- | --- | --- |
-| `SCAN_INTERVAL_S` / `--interval` | 240 | 轮询间隔秒数 |
+| `SCAN_INTERVAL_S` / `--interval` | 240 | 轮询间隔秒数；填 `0` 改为按额度自动定频，见下面的 `BUDGET_RPH` |
+| `BUDGET_RPH` | 90 | 自动定频下每小时允许的排期查询请求数，间隔 = 3600 × 日期数 ÷ 该值。实测单日额度约 1200 次，30-60 秒一轮两三个小时就会打满 |
+| `QUOTA_RETRY_S` | 900 | 撞限额后每隔多久发一个探测请求 |
+| `ALERT_PUSH_CAP` | 3 | 同一类报错每天最多推送到手机几次，空位告警不受此限 |
 | `ACTIVE_START_HOUR` / `ACTIVE_END_HOUR` | 7 / 23 | 发请求的时段窗口 |
 | `HOLD_UNTIL` | 空 | `YYYY-MM-DD HH:MM`，在此之前完全不打接口 |
 | `SCAN_TARGETS` | 空 | `日期:起-止` 逗号分隔 |
@@ -93,11 +96,13 @@ SCAN_TARGETS="2026-10-21:13-22,2026-10-24:7-22" .venv/bin/python scan_notify.py 
 
 一次查询返回整天 15 个时段，扫全天与扫一小时调用量相同。会话是否可用以排期查询能否拿到 `dateId` 判定。命中后复采，累计 `CONFIRM_NEED`（默认 2）次可约就提示；只有一次都没采到可约才判成抖动写入 `[slot_blink]`，采到过可约但没够次数也照样提示。提示时弹一个静默对话框，40 秒后仍有空位再补一个。告警落在本机对话框、`notifications.txt`、`notifications.json` 三处。需要在手机上接收的，把 Server酱 SendKey 或飞书、企业微信机器人 webhook 填进 `config.json` 的通知配置、界面里对应的输入框，或者用 `notify_store.py` 存进本机 `state/notify.json`（0600，不进版本库）；环境变量为空时 `load_config` 会自动读这个文件，重启扫描不用重新带一遍地址。配好之后 `python test_notify.py <webhook> [加签密钥]` 当场发一条验证，飞书自定义机器人的安全设置选「签名校验」就把密钥一起传，选「自定义关键词」就填「健身房」——推送标题固定带这两个字，否则机器人会按关键词把消息退回 `Key Words Not Found`，而扫描器会把退回原因写进 `scan.log`。
 
-轮询分两层。粗筛调 `queryFieldReserveSituationIsFull`，一个请求返回全部约 8 个日期的 `dateId`、`isAll`（当天是否全满）和 `open`，`isAll=true` 的日期直接判定为空；核对轮调 `queryFieldSituation`，一天一次，拿到完整排期矩阵。两层各自计限，粗筛把单轮请求数从「日期数」压到 1，60 秒一轮也能覆盖全天所有目标日期。核对轮用于校准 `isAll`，一旦发现粗筛说满而排期有位，程序写入 `[flag_mismatch]` 并退回每轮全查。撞到 `每日请求超过限制` 时休眠到次日 00:10。
+轮询分两层。粗筛调 `queryFieldReserveSituationIsFull`，一个请求返回全部约 8 个日期的 `dateId`、`isAll`（当天是否全满）和 `open`，`isAll=true` 的日期直接判定为空；核对轮调 `queryFieldSituation`，一天一次，拿到完整排期矩阵。两层各自计限，粗筛把单轮请求数从「日期数」压到 1，60 秒一轮也能覆盖全天所有目标日期。核对轮用于校准 `isAll`，一旦发现粗筛说满而排期有位，程序写入 `[flag_mismatch]` 并退回每轮全查。撞到 `每日请求超过限制` 时按 `QUOTA_RETRY_S`（默认 900 秒）重探一次，每次只发一个探测请求；实测限额更像按会话或滚动窗口回收，午夜并不清账，所以不会一口气睡到次日。
 
-`isfull_watch.py` 是备用通道：`queryFieldSituation` 被限额锁住时，用限额独立的 `queryFieldReserveSituationIsFull` 盯 `isAll` 翻转，'
-    '翻 false 就弹框并推飞书（`[gate_available]`，给不出具体钟点，需要人去页面确认）。长期进程一律用 `run_detached.py` 起，'
-    '它把任务放进独立会话（`start_new_session`）并挂 `caffeinate`，不会随启动它的 shell 一起被收掉。
+`isfull_watch.py` 是备用通道：`queryFieldSituation` 被限额锁住时，用限额独立的 `queryFieldReserveSituationIsFull` 盯 `isAll` 翻转，翻 `false` 就弹框并推飞书（`[gate_available]`，给不出具体钟点，需要人去页面确认）。长期进程一律用 `run_detached.py` 起，它把任务放进独立会话（`start_new_session`）并挂 `caffeinate`，不会随启动它的 shell 一起被收掉。
+
+`keepalive.py` 是第三层保障，用同样的方式启动，每 120 秒查一次 `run_detached.py` 记录的 pid 和各任务日志的修改时间：进程消失，或活跃时段内日志 45 分钟没动，就收掉残留进程重新拉起，并推一条「已自动重启」。机器重启或一次卡死都不会再让扫描静默停掉半天。它只把凭证从自己的环境变量往下传给子进程，不落盘；环境里没有密码时依旧能重启任务，只是自动重登退化为「复用浏览器 profile 里的会话」这一条路。
+
+自动重登同样分三段限时：`harvest_session.py`（150 秒）、`login_assist.py`（420 秒）、`strict_login.py`（420 秒），每段跑完用排期能否拿到 `dateId` 判定会话是否可用，耗时写进日志。三段各跑在子进程里，任何一段把浏览器卡死都会被超时杀掉，主循环继续，不会再出现「一次重登占住扫描将近一个半小时且中间零日志」。预算分别可用 `HARVEST_BUDGET_S`、`LOGIN_BUDGET_S`、`STRICT_BUDGET_S` 调整。
 
 ## 课表
 
