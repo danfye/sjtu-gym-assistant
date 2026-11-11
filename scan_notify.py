@@ -795,7 +795,8 @@ def main():
                 '（限额更像滚动窗口，午夜不一定清账）')
             if time.time() - state.get('_quota_notify_ts', 0) > AUTH_NOTIFY_COOLDOWN_S:
                 notify_progress('quota_exhausted',
-                                f'今日请求配额已用尽，扫描休眠到 {nxt:%m-%d %H:%M}（约 {wait_s/3600:.1f} 小时后恢复）',
+                                f'今日请求配额已用尽，改为每 {nap_s / 60:.0f} 分钟单发一次探测，'
+                                '释放就恢复全量轮询（限额是滚动窗口，不会只等到午夜）',
                                 repeat=False)
                 state['_quota_notify_ts'] = time.time()
                 save_state(state)
