@@ -106,10 +106,18 @@ def within_active_hours():
 
 
 def idle_s(logfile):
+    """日志多久没动。跨过夜间静默要打折：扫描器 23:00-10:00 本来就只写一行然后睡到早上，
+    2026-11-11 10:00 就看门狗把「睡了 659 分钟」当成卡死重启了一次 —— 没坏处，但是误判。
+    所以活跃时段开头的 idle 以「进入时段以来」为准。"""
     try:
-        return time.time() - (BASE / logfile).stat().st_mtime
+        idle = time.time() - (BASE / logfile).stat().st_mtime
     except Exception:
         return 0.0
+    now = datetime.now()
+    if now.hour >= ACTIVE_START_HOUR:
+        window_start = now.replace(hour=ACTIVE_START_HOUR, minute=0, second=0, microsecond=0)
+        idle = min(idle, (now - window_start).total_seconds())
+    return idle
 
 
 def restart(script, args):
