@@ -118,6 +118,12 @@ def main():
     dates = sorted({d for d, _ in targets()})
     log(f'粗筛哨兵启动：盯 {" ".join(dates)}；每 {interval:.0f}s 一次请求（IsFull 接口，与排期限额分开计）')
     while True:
+        # 目标日期每轮重新算：以前算一次就固定，长跑三五天后盯的还是开机那天的日期，
+        # 新滚进来的日期根本没进粗筛（2026-11-14 发现，那天还在看 11-11，11-19/11-20 漏扫）。
+        cur = sorted({d for d, _ in targets()})
+        if cur != dates:
+            log(f'目标日期滚动：{" ".join(cur)}（原 {" ".join(dates) or "无"}）')
+            dates = cur
         cookie = load_cookie()[0]
         probe_date = dates[0] if dates else time.strftime('%Y-%m-%d')
         ids, msg = SN.is_full_state(cookie, probe_date)

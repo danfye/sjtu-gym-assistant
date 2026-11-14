@@ -26,6 +26,7 @@ LOG = BASE / 'keepalive.log'
 STATE = BASE / 'state' / 'keepalive_state.json'
 CHECK_S = float(os.environ.get('KEEPALIVE_CHECK_S', '120'))
 STALE_S = float(os.environ.get('KEEPALIVE_STALE_S', '2700'))     # 日志 45 分钟不动才算卡死
+GRACE_S = float(os.environ.get('KEEPALIVE_GRACE_S', '600'))      # 刚起来的进程 10 分钟内不判卡死，避免和人工/重启抢拉起
 RESTART_COOLDOWN_S = float(os.environ.get('KEEPALIVE_COOLDOWN_S', '600'))
 ESCALATE_WINDOW_S = float(os.environ.get('KEEPALIVE_ESCALATE_S', '1800'))
 PUSH_CAP_PER_DAY = int(os.environ.get('KEEPALIVE_PUSH_CAP', '2'))
@@ -120,6 +121,23 @@ def idle_s(logfile):
     return idle
 
 
+def proc_age_s(pid):
+    """进程已经跑了多少秒，取不到就当很大。"""
+    try:
+        out = subprocess.run(['ps', '-o', 'etime=', '-p', str(int(pid))],
+                             capture_output=True, text=True, timeout=10).stdout.strip()
+    except Exception:
+        return 1e9
+    if not out:
+        return 1e9
+    days, _, rest = out.rpartition('-')
+    parts = [int(x) for x in rest.split(':')]
+    while len(parts) < 3:
+        parts.insert(0, 0)
+    h, m, s = parts[-3:]
+    return (int(days) * 86400 if days else 0) + h * 3600 + m * 60 + s
+
+
 def restart(script, args):
     """静默重启：成功与否都返回给调用方，是否喊人由 main 循环按连续失败次数决定。"""
     pid = pids().get(script)
@@ -159,7 +177,8 @@ def main():
             reason = None
             if not pid or not alive(pid):
                 reason = '进程不在了'
-            elif idle_s(logfile) > STALE_S and within_active_hours():
+            elif idle_s(logfile) > STALE_S and within_active_hours() and \
+                    proc_age_s(pid) > GRACE_S:
                 reason = f'日志 {idle_s(logfile) / 60:.0f} 分钟没动'
             if not reason:
                 # 活着就当作已恢复；只在真恢复后清一次计数，避免每次循环都写盘
