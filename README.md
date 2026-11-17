@@ -104,6 +104,15 @@ SCAN_TARGETS="2026-10-21:13-22,2026-10-24:7-22" .venv/bin/python scan_notify.py 
 
 自动重登同样分三段限时：`harvest_session.py`（150 秒）、`login_assist.py`（420 秒）、`strict_login.py`（420 秒），每段跑完用排期能否拿到 `dateId` 判定会话是否可用，耗时写进日志。三段各跑在子进程里，任何一段把浏览器卡死都会被超时杀掉，主循环继续，不会再出现「一次重登占住扫描将近一个半小时且中间零日志」。预算分别可用 `HARVEST_BUDGET_S`、`LOGIN_BUDGET_S`、`STRICT_BUDGET_S` 调整。
 
+## 查自己已经约了哪几天
+
+`my_bookings.py` 走浏览器（复用 `chrome-profile` 里的 jAccount 可信会话）打开 `https://sports.sjtu.edu.cn/pc/#/Order`，翻完订单分页，把状态是「预订成功 / 已签到 / 待使用」且日期不早于今天的条目打印成 `SUMMARY` JSON。用途是自动剔除已经抢到的日子，免得继续为它们花请求额度。它只读列表，不点「取消订单」，也不点任何下单按钮；和登录脚本共用 `/tmp/gym_login.lock`，不会跟自动重登抢同一个 profile。
+
+```bash
+CHROME_USER_DATA_DIR=$PWD/chrome-profile CHROME_BINARY='/Applications/Google Chrome.app/Contents/MacOS/Google Chrome' \
+  .venv/bin/python my_bookings.py
+```
+
 ## 课表
 
 ```bash
